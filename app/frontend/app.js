@@ -4803,6 +4803,39 @@ function applyImportedToInputs(imported, onlyIfEmpty = false) {
   return count;
 }
 
+async function parseApiResponse(res) {
+  let data = null;
+  try {
+    data = await res.json();
+  } catch (parseErr) {
+    data = null;
+  }
+  if (!res.ok) {
+    if (data && (data.message || data.error || data.error_code)) {
+      const code = data.error_code ? ` [${data.error_code}]` : "";
+      const msg = data.message || data.error || "Неизвестная ошибка сервера";
+      throw new Error(`Ошибка сервера (${res.status})${code}: ${msg}`);
+    }
+    throw new Error(`Ошибка сервера HTTP ${res.status}. Проверьте состояние процесса Launcher.`);
+  }
+  return data || {};
+}
+
+function handleApiFetchError(err, prefix = "Не удалось определить программы Windows") {
+  const isNetwork =
+    err instanceof TypeError ||
+    String(err.message || "").toLowerCase().includes("failed to fetch") ||
+    String(err.message || "").toLowerCase().includes("networkerror") ||
+    String(err.message || "").toLowerCase().includes("load failed");
+  if (isNetwork) {
+    showToast(
+      "Нет соединения с локальным backend Launcher.\nПолностью перезапустите Launcher.\nПодробности доступны в журнале Launcher."
+    );
+  } else {
+    showToast(`${prefix}: ${err.message || err}.\nПодробности записаны в журнал Launcher.`);
+  }
+}
+
 async function fillEmptyFromWindows() {
   const btn = document.getElementById("settingsFillEmptyBtn");
   const prevText = btn ? btn.textContent : "";
@@ -4813,15 +4846,12 @@ async function fillEmptyFromWindows() {
   try {
     const res = await fetch("/api/config/apps/import-windows", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
       body: JSON.stringify({ mode: "fill_empty" })
     });
-    if (!res.ok) {
-      throw new Error(`Ошибка сервера: HTTP ${res.status}`);
-    }
-    const data = await res.json();
+    const data = await parseApiResponse(res);
     const count = applyImportedToInputs(data.imported || {}, true);
-    if (data.skipped?.[".dwg"] === "no_usable_windows_association") {
+    if (data.skipped?.[".dwg"] === "no_usable_windows_association" || data.report?.dwgHint) {
       const dwgInput = document.getElementById("settingDwgExe");
       if (!dwgInput || !dwgInput.value) {
         setDwgHint("Windows вернула системный CAD launcher, а не фактическое приложение. Выберите DWG Viewer или AutoCAD вручную.");
@@ -4836,7 +4866,7 @@ async function fillEmptyFromWindows() {
       showToast("Все поля уже заполнены или Windows не вернула подходящих ассоциаций.");
     }
   } catch (err) {
-    showToast(`Ошибка импорта: ${err.message || err}`);
+    handleApiFetchError(err, "Не удалось определить программы Windows");
   } finally {
     if (btn) {
       btn.disabled = false;
@@ -4862,15 +4892,12 @@ async function replaceFromWindows() {
   try {
     const res = await fetch("/api/config/apps/import-windows", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
       body: JSON.stringify({ mode: "replace_confirmed" })
     });
-    if (!res.ok) {
-      throw new Error(`Ошибка сервера: HTTP ${res.status}`);
-    }
-    const data = await res.json();
+    const data = await parseApiResponse(res);
     const count = applyImportedToInputs(data.imported || {}, false);
-    if (data.skipped?.[".dwg"] === "no_usable_windows_association") {
+    if (data.skipped?.[".dwg"] === "no_usable_windows_association" || data.report?.dwgHint) {
       setDwgHint("Windows вернула системный CAD launcher, а не фактическое приложение. Выберите DWG Viewer или AutoCAD вручную.");
     } else {
       updateDwgHintVisibility();
@@ -4882,7 +4909,7 @@ async function replaceFromWindows() {
       showToast("Подходящих ассоциаций Windows не найдено.");
     }
   } catch (err) {
-    showToast(`Ошибка замены: ${err.message || err}`);
+    handleApiFetchError(err, "Не удалось заменить программы Windows");
   } finally {
     if (btn) {
       btn.disabled = false;
@@ -4900,15 +4927,12 @@ async function openWindowsSettings() {
   try {
     const res = await fetch("/api/config/apps/open-windows-settings", {
       method: "POST",
-      headers: { Accept: "application/json" }
+      headers: { "Accept": "application/json" }
     });
-    if (!res.ok) {
-      const errData = await res.json().catch(() => ({}));
-      throw new Error(errData.error || `HTTP ${res.status}`);
-    }
+    await parseApiResponse(res);
     showToast("Открываем параметры приложений Windows…");
   } catch (err) {
-    showToast(`Не удалось открыть параметры Windows: ${err.message || err}`);
+    handleApiFetchError(err, "Не удалось открыть настройки Windows");
   } finally {
     if (btn) {
       btn.disabled = false;

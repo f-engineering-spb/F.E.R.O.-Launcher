@@ -3183,12 +3183,29 @@ class LauncherHandler(BaseHTTPRequestHandler):
         with (logs_dir / "server.log").open("a", encoding="utf-8") as log:
             log.write("%s - %s\n" % (self.log_date_time_string(), format % args))
 
+    def _apply_cors_headers(self) -> None:
+        origin = self.headers.get("Origin", "")
+        if origin and ("://127.0.0.1" in origin or "://localhost" in origin):
+            self.send_header("Access-Control-Allow-Origin", origin)
+        else:
+            self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Accept, X-Requested-With")
+        self.send_header("Access-Control-Max-Age", "86400")
+
+    def do_OPTIONS(self) -> None:
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self._apply_cors_headers()
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def send_json(self, status: HTTPStatus, payload: dict) -> None:
         try:
             body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            self._apply_cors_headers()
             self.end_headers()
             self.wfile.write(body)
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
@@ -3522,7 +3539,17 @@ class LauncherHandler(BaseHTTPRequestHandler):
                     "report": report,
                 })
             except Exception as error:
-                self.send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(error)})
+                traceback_str = traceback.format_exc()
+                self.log_message("[Error] /api/config/apps/import-windows failed:\n%s", traceback_str)
+                self.send_json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {
+                        "ok": False,
+                        "error_code": "internal_error",
+                        "message": f"Не удалось выполнить операцию: {error}. Подробности записаны в журнал Launcher.",
+                        "details": str(error),
+                    },
+                )
             return
 
         if parsed.path == "/api/config/apps/open-windows-settings":
@@ -3533,7 +3560,17 @@ class LauncherHandler(BaseHTTPRequestHandler):
                         os.startfile("ms-settings:defaultapps")
                 self.send_json(HTTPStatus.OK, {"ok": True})
             except Exception as error:
-                self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": str(error)})
+                traceback_str = traceback.format_exc()
+                self.log_message("[Error] /api/config/apps/open-windows-settings failed:\n%s", traceback_str)
+                self.send_json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {
+                        "ok": False,
+                        "error_code": "internal_error",
+                        "message": f"Не удалось открыть настройки Windows: {error}. Подробности записаны в журнал Launcher.",
+                        "details": str(error),
+                    },
+                )
             return
 
         if parsed.path == "/api/choose-exe":
@@ -3547,21 +3584,34 @@ class LauncherHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/config/apps/autodetect":
+            # LEGACY COMPATIBILITY ENDPOINT:
+            # Использовался прежними версиями интерфейса. Выполняет безопасный fill_empty импорт
+            # без перезаписи настроек пользователя и возвращает обратно-совместимый JSON.
             try:
-                target_exts = [
-                    ".pdf", ".dwg", ".dxf", ".xlsx", ".xls", ".xlsm", ".csv", ".ods",
-                    ".docx", ".doc", ".rtf", ".odt", ".pptx", ".ppt", ".txt",
-                    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp",
-                    ".mp4", ".avi", ".mov", ".mkv", ".mp3", ".wav", ".zip", ".rar", ".7z"
-                ]
+                cfg, report = import_windows_default_app_mappings(mode="fill_empty", save=False)
                 detected = {}
-                for ext in target_exts:
-                    app_path = detect_windows_app_for_ext(ext)
-                    if app_path:
-                        detected[ext] = app_path
-                self.send_json(HTTPStatus.OK, {"ok": True, "detected": detected})
+                for ext in ALL_SUPPORTED_EXTENSIONS:
+                    p = _extract_app_path(cfg.get(ext))
+                    if p:
+                        detected[ext] = p
+                self.send_json(HTTPStatus.OK, {
+                    "ok": True,
+                    "detected": detected,
+                    "config": cfg,
+                    "report": report,
+                })
             except Exception as error:
-                self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(error)})
+                traceback_str = traceback.format_exc()
+                self.log_message("[Error] /api/config/apps/autodetect failed:\n%s", traceback_str)
+                self.send_json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {
+                        "ok": False,
+                        "error_code": "internal_error",
+                        "message": f"Не удалось выполнить операцию: {error}. Подробности записаны в журнал Launcher.",
+                        "details": str(error),
+                    },
+                )
             return
 
         if parsed.path == "/api/pdf/render":
