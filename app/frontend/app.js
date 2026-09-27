@@ -623,9 +623,24 @@ function getCachedFlatNodes() {
   return state.currentManifest._flatNodes;
 }
 
-function flattenTree(node, result = []) {
-  result.push(node);
-  for (const child of node.children || []) flattenTree(child, result);
+function flattenTree(rootNode, result = []) {
+  if (!rootNode) return result;
+  const stack = [rootNode];
+  const seen = new Set();
+  while (stack.length) {
+    const node = stack.pop();
+    if (!node) continue;
+    const key = node.path || node;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(node);
+    const children = node.children;
+    if (children && children.length) {
+      for (let i = children.length - 1; i >= 0; i--) {
+        stack.push(children[i]);
+      }
+    }
+  }
   return result;
 }
 
@@ -924,38 +939,60 @@ function findPdfPairForDwg(dwgNode, pdfIndex, options = {}) {
 
 let nodeMatchCache = null;
 
-function nodeMatches(node) {
+function nodeMatches(node, visiting = new Set()) {
   if (!node) return false;
+  const query = els.treeSearch.value.trim().toLocaleLowerCase("ru");
+  const hasFormatFilter = state.activeFilters.size > 0;
+  // Если поиск не ведётся и фильтры отключены — любой узел подходит сразу без рекурсии
+  if (!query && !hasFormatFilter && !state.diffFilter) {
+    return true;
+  }
   if (nodeMatchCache && nodeMatchCache.has(node)) {
     return nodeMatchCache.get(node);
   }
-  const query = els.treeSearch.value.trim().toLocaleLowerCase("ru");
-  const hasFormatFilter = state.activeFilters.size > 0;
+  if (visiting.has(node)) {
+    return false;
+  }
+  visiting.add(node);
+
   const value = `${node.name} ${node.extension || ""} ${node.path || ""}`.toLocaleLowerCase("ru");
   const searchOk = !query || value.includes(query);
   const formatOk = !hasFormatFilter || node.type === "folder" || state.activeFilters.has(node.extension);
   if (node.type === "file") {
     if (state.diffFilter && !state.diffStatus.has(node.path)) {
       if (nodeMatchCache) nodeMatchCache.set(node, false);
+      visiting.delete(node);
       return false;
     }
     const res = searchOk && formatOk;
     if (nodeMatchCache) nodeMatchCache.set(node, res);
+    visiting.delete(node);
     return res;
   }
-  const childMatch = (node.children || []).some((child) => nodeMatches(child));
+
+  // Для папок: если имя совпало с поиском (и нет фильтра расширений), сразу подходит
+  if (!state.diffFilter && searchOk && !hasFormatFilter) {
+    if (nodeMatchCache) nodeMatchCache.set(node, true);
+    visiting.delete(node);
+    return true;
+  }
+
+  const childMatch = (node.children || []).some((child) => nodeMatches(child, visiting));
   const res = state.diffFilter ? childMatch : (childMatch || searchOk);
   if (nodeMatchCache) nodeMatchCache.set(node, res);
+  visiting.delete(node);
   return res;
 }
 
-function countDiffDescendants(node, result = { added: 0, changed: 0, removed: 0 }) {
+function countDiffDescendants(node, result = { added: 0, changed: 0, removed: 0 }, seen = new Set()) {
+  if (!node || seen.has(node)) return result;
+  seen.add(node);
   for (const child of node.children || []) {
     if (child.type === "file") {
       const status = state.diffStatus.get(child.path);
       if (status && status in result) result[status] += 1;
     } else {
-      countDiffDescendants(child, result);
+      countDiffDescendants(child, result, seen);
     }
   }
   return result;
@@ -1345,15 +1382,20 @@ function updateRailSelectionHighlight() {
 
 function rebuildVisibleRows() {
   state.visibleRows = [];
-  function walk(node) {
-    if (!nodeMatches(node)) return;
+  if (!state.currentManifest?.tree) return;
+  const stack = [state.currentManifest.tree];
+  const seen = new Set();
+  while (stack.length) {
+    const node = stack.pop();
+    if (!node || seen.has(node)) continue;
+    seen.add(node);
+    if (!nodeMatches(node)) continue;
     state.visibleRows.push(node);
     if (node.type === "folder" && !state.collapsedFolders.has(node.path) && node.children) {
-      node.children.forEach(walk);
+      for (let i = node.children.length - 1; i >= 0; i--) {
+        stack.push(node.children[i]);
+      }
     }
-  }
-  if (state.currentManifest?.tree) {
-    walk(state.currentManifest.tree);
   }
   if (state.diffRemovedNodes?.length && !state.diffFilter) {
     state.diffRemovedNodes.forEach((node) => state.visibleRows.push(node));
@@ -1608,13 +1650,14 @@ function treeFilteringActive() {
 }
 
 function collapseAllFolders() {
-  // Большие объекты (десятки тысяч файлов) открываем свёрнутыми:
-  // рисуются только верхние строки, остальное — по клику.
   state.collapsedFolders.clear();
   if (!state.currentManifest?.tree) return;
   const stack = [state.currentManifest.tree];
+  const seen = new Set();
   while (stack.length) {
     const node = stack.pop();
+    if (!node || seen.has(node)) continue;
+    seen.add(node);
     for (const child of node.children || []) {
       if (child.type === "folder") {
         state.collapsedFolders.add(child.path);
