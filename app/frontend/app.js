@@ -115,6 +115,7 @@ const els = {
   settingsModal: document.getElementById("settingsModal"),
   settingsCloseBtn: document.getElementById("settingsCloseBtn"),
   settingsCancelBtn: document.getElementById("settingsCancelBtn"),
+  settingsAutoDetectBtn: document.getElementById("settingsAutoDetectBtn"),
   settingsSaveBtn: document.getElementById("settingsSaveBtn"),
 
 };
@@ -3860,21 +3861,12 @@ window.addEventListener("resize", () => {
 // Масштабирование только содержимого дерева (колёсико над левой частью)
 if (els.sidebar) {
   els.sidebar.addEventListener("wheel", (event) => {
-    if (!event.deltaY) return;
-    const isHeaderArea = Boolean(event.target.closest(".action-grid, .scale-widget, .format-strip, .stats, .progress-panel"));
-    const activeScrollContainer = inTreeMode() ? els.objectTree : els.objectList;
-    const canScroll = activeScrollContainer && (activeScrollContainer.scrollHeight > activeScrollContainer.clientHeight + 4);
-
-    // Зум срабатывает: при зажатом Ctrl, либо над верхней частью/кнопками, либо если список не требует вертикальной прокрутки
-    if (event.ctrlKey || isHeaderArea || !canScroll) {
-      event.preventDefault();
-      event.stopPropagation();
-      zoomTree(event.deltaY < 0 ? 1.08 : 0.92);
-    }
+    if (!event.ctrlKey || !event.deltaY) return;
+    event.preventDefault();
+    event.stopPropagation();
+    zoomTree(event.deltaY < 0 ? 1.08 : 0.92);
   }, { passive: false });
 }
-
-// Прямой зум при кручении колёсика над блоком масштаба [−] [100%] [+] (без зажатия Ctrl)
 if (els.scaleWidget) {
   els.scaleWidget.addEventListener("wheel", (event) => {
     if (!event.deltaY) return;
@@ -4455,6 +4447,7 @@ function renderSettingsAppRows(cfg) {
     const browse = document.createElement("button");
     browse.type = "button";
     browse.className = "settings-browse-btn";
+    browse.dataset.target = group.id;
     browse.title = "Выбрать файл .exe через проводник";
     browse.textContent = "Обзор…";
     browse.addEventListener("click", () => browseExeForSetting(group.id));
@@ -4552,6 +4545,51 @@ function closeSettingsModal() {
   if (els.settingsModal) els.settingsModal.hidden = true;
 }
 
+
+async function autoDetectWindowsApps() {
+  const btn = document.getElementById("settingsAutoDetectBtn");
+  const prevText = btn ? btn.textContent : "";
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "⏳ Опрос ассоциаций Windows...";
+  }
+  showToast("Определение программ по умолчанию в Windows...");
+  try {
+    const res = await fetch("/api/config/apps/autodetect", {
+      method: "POST",
+      headers: { Accept: "application/json" }
+    });
+    if (!res.ok) {
+      throw new Error(`Сервер вернул статус HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    const detected = data.detected || {};
+    let filledCount = 0;
+    document.querySelectorAll("#settingsAppsForm .settings-input").forEach((input) => {
+      const exts = String(input.dataset.exts || "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
+      for (const ext of exts) {
+        if (detected[ext]) {
+          input.value = detected[ext];
+          filledCount++;
+          break;
+        }
+      }
+    });
+    if (filledCount > 0) {
+      showToast(`Успешно заполнено категорий: ${filledCount}. Нажмите «Сохранить»!`);
+    } else {
+      showToast("В Windows не найдены явные файловые ассоциации или программы отсутствуют.");
+    }
+  } catch (err) {
+    showToast(`Ошибка автоопределения: ${err.message || err}`);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = prevText;
+    }
+  }
+}
+
 async function saveSettings() {
   const cfg = {
     useNativeApps: state.appSettings?.useNativeApps !== false,
@@ -4583,22 +4621,37 @@ async function saveSettings() {
 async function browseExeForSetting(inputId) {
   const input = document.getElementById(inputId);
   if (!input) return;
+  const btn = document.querySelector(`.settings-browse-btn[data-target="${inputId}"]`);
+  if (btn) btn.disabled = true;
   try {
-    const res = await fetch("/api/choose-exe");
+    const currentPath = (input.value || "").trim();
+    const res = await fetch("/api/choose-exe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ current: currentPath }),
+    });
+    if (!res.ok) {
+      throw new Error(`Ошибка сервера: HTTP ${res.status}`);
+    }
     const data = await res.json();
     if (data.path) {
       input.value = data.path;
-    } else if (data.error) {
+      input.classList.add("input-updated");
+      setTimeout(() => input.classList.remove("input-updated"), 1500);
+    } else if (data.error && !data.cancelled && !data.timedOut) {
       showOperationError(new Error(data.error));
     }
   } catch (err) {
     showOperationError(err);
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
 if (els.btnSettings) els.btnSettings.addEventListener("click", openSettingsModal);
 if (els.settingsCloseBtn) els.settingsCloseBtn.addEventListener("click", closeSettingsModal);
 if (els.settingsCancelBtn) els.settingsCancelBtn.addEventListener("click", closeSettingsModal);
+if (els.settingsAutoDetectBtn) els.settingsAutoDetectBtn.addEventListener("click", autoDetectWindowsApps);
 if (els.settingsSaveBtn) els.settingsSaveBtn.addEventListener("click", saveSettings);
 if (els.settingsModal) {
   els.settingsModal.addEventListener("click", (event) => {

@@ -2626,6 +2626,106 @@ def render_pdf_page(path: Path, page: int, dpi: int = DEFAULT_PDF_DPI, page_time
     }
 
 
+
+try:
+    import winreg
+except ImportError:
+    winreg = None
+
+
+def _clean_configured_exe_path(raw: str) -> str:
+    if not raw:
+        return ""
+    raw = raw.strip()
+    m = re.match(r'^"([^"]+\.exe)"', raw, re.IGNORECASE)
+    if m:
+        cand = m.group(1)
+        if Path(cand).is_file():
+            return str(Path(cand).resolve())
+    m2 = re.match(r'^([a-zA-Z]:\\S+\.exe)', raw, re.IGNORECASE)
+    if m2:
+        cand = m2.group(1)
+        if Path(cand).is_file():
+            return str(Path(cand).resolve())
+    try:
+        parts = shlex.split(raw, posix=False)
+        for part in parts:
+            p = part.strip('"')
+            if p.lower().endswith(".exe") and Path(p).is_file():
+                return str(Path(p).resolve())
+    except Exception:
+        pass
+    return ""
+
+
+def _get_command_from_progid(progid: str) -> str:
+    if not winreg or not progid:
+        return ""
+    keys_to_try = [
+        f"{progid}\\shell\\open\\command",
+        f"{progid}\\shell\\Open\\command",
+        f"{progid}\\shell\\edit\\command",
+    ]
+    for subkey in keys_to_try:
+        try:
+            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, subkey) as k:
+                val, _ = winreg.QueryValueEx(k, "")
+                cleaned = _clean_configured_exe_path(val)
+                if cleaned:
+                    return cleaned
+        except OSError:
+            pass
+    return ""
+
+
+def detect_windows_app_for_ext(ext: str) -> str:
+    """Определяет установленную в Windows программу по умолчанию для расширения."""
+    if not winreg:
+        return ""
+    ext = ext.lower().strip()
+    if not ext.startswith("."):
+        ext = "." + ext
+
+    # 1. UserChoice (Windows 10 / 11 modern default)
+    user_choice = f"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\{ext}\\UserChoice"
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, user_choice) as k:
+            progid, _ = winreg.QueryValueEx(k, "ProgId")
+            res = _get_command_from_progid(progid)
+            if res:
+                return res
+    except OSError:
+        pass
+
+    # 2. HKEY_CLASSES_ROOT default ProgID
+    try:
+        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, ext) as k:
+            progid = winreg.QueryValue(k, "")
+            res = _get_command_from_progid(progid)
+            if res:
+                return res
+    except OSError:
+        pass
+
+    # 3. OpenWithProgids
+    openwith = f"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\{ext}\\OpenWithProgids"
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, openwith) as k:
+            i = 0
+            while True:
+                try:
+                    name, _, _ = winreg.EnumValue(k, i)
+                    res = _get_command_from_progid(name)
+                    if res:
+                        return res
+                    i += 1
+                except OSError:
+                    break
+    except OSError:
+        pass
+
+    return ""
+
 class LauncherHandler(BaseHTTPRequestHandler):
     server_version = "FEngineeringLauncherV3/0.1"
 
@@ -2653,8 +2753,51 @@ class LauncherHandler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length)
         return json.loads(raw.decode("utf-8"))
 
+    def handle_choose_exe(self, initial_path: str = "") -> None:
+        try:
+            choose_script = REPO_ROOT / "scripts" / "choose_exe.py"
+            choose_env = dict(os.environ)
+            choose_env["PYTHONUTF8"] = "1"
+            choose_env["PYTHONIOENCODING"] = "utf-8"
+            args = [sys.executable, str(choose_script)]
+            if initial_path:
+                args.append(initial_path)
+            creation_flags = 0
+            if os.name == "nt":
+                creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            proc = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=120,
+                env=choose_env,
+                creationflags=creation_flags,
+            )
+            raw = proc.stdout.strip()
+            selected = ""
+            if raw:
+                try:
+                    parsed_json = json.loads(raw)
+                    if isinstance(parsed_json, str):
+                        selected = parsed_json
+                except Exception:
+                    selected = raw.strip('"')
+            self.send_json(HTTPStatus.OK, {"path": selected})
+        except subprocess.TimeoutExpired:
+            self.send_json(
+                HTTPStatus.OK,
+                {"path": "", "timedOut": True, "error": "Диалог выбора программы не ответил за 120 секунд."},
+            )
+        except Exception as error:
+            self.send_json(HTTPStatus.OK, {"path": "", "error": f"Ошибка вызова диалога: {error}"})
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/choose-exe":
+            self.handle_choose_exe(initial_path="")
+            return
         if parsed.path == "/api/health":
             self.send_json(
                 HTTPStatus.OK,
@@ -2905,37 +3048,30 @@ class LauncherHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/choose-exe":
+            initial_path = ""
             try:
-                choose_script = REPO_ROOT / "scripts" / "choose_exe.py"
-                choose_env = dict(os.environ)
-                choose_env["PYTHONUTF8"] = "1"
-                choose_env["PYTHONIOENCODING"] = "utf-8"
-                proc = subprocess.run(
-                    [sys.executable, str(choose_script)],
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="strict",
-                    timeout=120,
-                    env=choose_env,
-                )
-                raw = proc.stdout.strip()
-                selected = ""
-                if raw:
-                    try:
-                        parsed_json = json.loads(raw)
-                        if isinstance(parsed_json, str):
-                            selected = parsed_json
-                    except Exception:
-                        selected = raw.strip('"')
-                self.send_json(HTTPStatus.OK, {"path": selected})
-            except subprocess.TimeoutExpired:
-                self.send_json(
-                    HTTPStatus.OK,
-                    {"path": "", "timedOut": True, "error": "Диалог выбора программы не ответил за 120 секунд."},
-                )
+                body = self.read_json()
+                initial_path = str(body.get("current", "") or body.get("path", "")).strip()
+            except Exception:
+                pass
+            self.handle_choose_exe(initial_path=initial_path)
+            return
+
+        if parsed.path == "/api/config/apps/autodetect":
+            try:
+                target_exts = [
+                    ".pdf", ".dwg", ".xlsx", ".xls", ".xlsm",
+                    ".docx", ".doc", ".txt", ".png", ".jpg",
+                    ".jpeg", ".pptx", ".mp4", ".zip", ".rar", ".7z"
+                ]
+                detected = {}
+                for ext in target_exts:
+                    app_path = detect_windows_app_for_ext(ext)
+                    if app_path:
+                        detected[ext] = app_path
+                self.send_json(HTTPStatus.OK, {"ok": True, "detected": detected})
             except Exception as error:
-                self.send_json(HTTPStatus.OK, {"path": "", "error": f"Ошибка вызова диалога: {error}"})
+                self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(error)})
             return
 
         if parsed.path == "/api/pdf/render":
