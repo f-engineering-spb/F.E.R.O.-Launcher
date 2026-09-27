@@ -380,12 +380,15 @@ def find_or_start_server() -> tuple[int, subprocess.Popen | None]:
     log(f"Starting backend on port {target_port}")
     # Запускаем server.py скрыто: никаких чёрных окон консоли
     python_exe = _backend_python()
+    creationflags = 0
+    if os.name == "nt":
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
     server_proc = subprocess.Popen(
         [python_exe, BACKEND, "--port", str(target_port)],
         cwd=REPO_ROOT,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        **hidden_process_kwargs(),
+        creationflags=creationflags,
     )
 
     # Привязываем дочерний процесс сервера к Windows Job Object с авто-завершением
@@ -427,7 +430,6 @@ def open_browser_window(url: str) -> None:
             os.makedirs(profile, exist_ok=True)
             subprocess.Popen(
                 [p, f"--app={url}", f"--user-data-dir={profile}", "--no-first-run", "--start-maximized"],
-                **hidden_process_kwargs(),
             )
             return
 

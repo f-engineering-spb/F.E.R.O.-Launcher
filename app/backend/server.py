@@ -1897,24 +1897,6 @@ def launch_custom_app(exe_path: str, file_path: Path) -> str:
             except Exception:
                 pass
 
-        # 3. Autodesk AcLauncher (официальный маршрутизатор Autodesk Shell Extension):
-        # Если Viewer/AutoCAD уже открыт — AcLauncher передаёт файл в УЖЕ открытый процесс без создания второго процесса.
-        # Если не открыт — запускает зарегистрированный вьювер.
-        ac_launcher = Path(r"C:\Program Files\Common Files\Autodesk Shared\AcShellEx\AcLauncher.exe")
-        if ac_launcher.is_file():
-            try:
-                creationflags = getattr(subprocess, "DETACHED_PROCESS", 0x00000008) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
-                subprocess.Popen(
-                    [str(ac_launcher), "/O", resolved_file],
-                    cwd=file_dir,
-                    creationflags=creationflags,
-                )
-                bring_native_window_to_front(0, resolved_exe)
-                _bring_window_to_front(None, None, 120.0, file_path.name, 3)
-                return f"custom-app-aclauncher:{exe_name}"
-            except Exception:
-                pass
-
     # 1. ShellExecuteW("open", resolved_exe, f'"{resolved_file}"', file_dir, SW_SHOWNORMAL=1)
     # Программа открывается полностью независимо от текущего процесса/Job Object,
     # окно гарантированно видимо (SW_SHOWNORMAL = 1) и активно.
@@ -3160,8 +3142,6 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 proc = subprocess.run(
                     [
                         "powershell.exe",
-                        "-WindowStyle",
-                        "Hidden",
                         "-STA",
                         "-NoProfile",
                         "-ExecutionPolicy",

@@ -500,13 +500,9 @@ async function openFileByPath(path, action) {
   lastOpenedTime = now;
 
   const act = String(action || "explorer");
-  const rawExt = extOfPath(path);
-  const custom = settingsCustomExe(rawExt);
   let actLabel = "Проводнике Windows";
-  if (act === "system") {
-    actLabel = "программе по умолчанию Windows";
-  } else if (act === "native") {
-    actLabel = custom ? getNativeAppLabel(rawExt) : "программе по умолчанию";
+  if (act === "system" || act === "native") {
+    actLabel = "программе по умолчанию";
   }
   startProgress("Запуск: " + actLabel, path);
   try {
@@ -2944,8 +2940,8 @@ function showPdfPage(page, options = {}) {
         <div class="native-file-name">${escapeHtml(page.name)}</div>
         <div class="native-file-message">${escapeHtml(page.message || "")}</div>
         <div class="native-file-path" title="${escapeHtml(sourcePath)}">${escapeHtml(sourcePath)}</div>
-        <button type="button" class="native-card-open-btn" id="nativeCardOpenBtn">Открыть файл в программе</button>
-        <div class="native-file-hint">Правая кнопка мыши — открыть / скопировать путь</div>
+        <button type="button" class="native-card-open-btn" id="nativeCardOpenBtn">Открыть в программе по умолчанию</button>
+        <div class="native-file-hint">Правая кнопка мыши: открыть в программе по умолчанию · открыть в проводнике · скопировать путь</div>
       </div>
     `;
 
@@ -4639,24 +4635,10 @@ function showFileContextMenu(clientX, clientY, target) {
   if (!menu || !target?.path) return;
   const items = [];
   if (!target.isDir) {
-    const rawExt = target.ext || extOfPath(target.path) || "";
-    const custom = settingsCustomExe(rawExt);
-    const label = getNativeAppLabel(rawExt);
-    if (custom) {
-      items.push({
-        label: `Открыть в ${label}`,
-        run: () => openFileByPath(target.path, "native"),
-      });
-      items.push({
-        label: "Открыть в программе по умолчанию",
-        run: () => openFileByPath(target.path, "system"),
-      });
-    } else {
-      items.push({
-        label: `Открыть в ${label}`,
-        run: () => openFileByPath(target.path, "native"),
-      });
-    }
+    items.push({
+      label: "Открыть в программе по умолчанию",
+      run: () => openFileByPath(target.path, "native"),
+    });
     items.push({ sep: true });
   }
   items.push({
