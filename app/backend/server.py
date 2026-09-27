@@ -2888,7 +2888,7 @@ class LauncherHandler(BaseHTTPRequestHandler):
         if length <= 0:
             return {}
         raw = self.rfile.read(length)
-        return json.loads(raw.decode("utf-8"))
+        return json.loads(raw.decode("utf-8-sig"))
 
     def handle_choose_exe(self, initial_path: str = "") -> None:
         try:
