@@ -9,10 +9,10 @@ $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
 if (-not (Test-Path -LiteralPath $InputPath -PathType Leaf)) {
-  throw "DWG-файл не найден: $InputPath"
+  throw "DWG-              : $InputPath"
 }
 
-# Целевой путь по умолчанию: та же папка, то же имя, расширение .pdf
+#                          :            ,          ,            .pdf
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
   $OutputPath = [System.IO.Path]::ChangeExtension($InputPath, ".pdf")
 }
@@ -24,7 +24,7 @@ if (-not [string]::IsNullOrWhiteSpace($outputDir) -and -not (Test-Path -LiteralP
   } catch {}
 }
 
-# 1. Попытка штатного экспорта через консоль AutoCAD (accoreconsole.exe) — без GUI и диалоговых окон
+# 1.                                         AutoCAD (accoreconsole.exe)       GUI                  
 $nativeExportScript = Join-Path $PSScriptRoot 'Invoke-NativeDwgPdfExport.ps1'
 if (Test-Path -LiteralPath $nativeExportScript) {
   try {
@@ -60,7 +60,7 @@ if (Test-Path -LiteralPath $nativeExportScript) {
       }
     }
   } catch {
-    # Если консоль не завершила экспорт, переходим к штатной печати через COM
+    #                                  ,                                  COM
   }
 }
 
@@ -100,7 +100,7 @@ public class LauncherMessageFilter : IOleMessageFilter
 }
 [LauncherMessageFilter]::Register()
 
-# Подключение к CAD через COM-интерфейс
+#               CAD       COM-         
 $comProgIds = @(
   "AutoCAD.Application.25",
   "AutoCAD.Application.24.3",
@@ -127,7 +127,7 @@ foreach ($progId in $comProgIds) {
 }
 
 if (-not $app) {
-  throw "Не удалось подключиться к AutoCAD через COM (проверены: $($comProgIds -join ', '))."
+  throw "                          AutoCAD       COM (         : $($comProgIds -join ', '))."
 }
 
 if (-not ([System.Management.Automation.PSTypeName]'LauncherWin32').Type) {
@@ -156,24 +156,24 @@ $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) "FEng_dwg_render_$session
 New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
 
 try {
-  # Открытие в режиме 'только чтение'
+  #                   '             '
   $document = $app.Documents.Open($InputPath, $true)
   $document.SetVariable("BACKGROUNDPLOT", 0)
   try { $document.SetVariable("EXPERT", 5) } catch {}
 
-  # Проверка листов (Layouts)
+  #                 (Layouts)
   $candidateLayouts = @($document.Layouts | Where-Object { -not $_.ModelType } | Sort-Object TabOrder)
   $nonEmptyLayouts = @($candidateLayouts | Where-Object { $_.Block.Count -gt 1 })
 
   $pagePdfPaths = [System.Collections.Generic.List[string]]::new()
 
   if ($nonEmptyLayouts.Count -gt 0) {
-    # Экспорт листов чертежа
+    #                       
     foreach ($layout in $nonEmptyLayouts) {
       $document.ActiveLayout = $layout
       $layout.RefreshPlotDeviceInfo()
 
-      # Выбор виртуального PDF-плоттера
+      #                    PDF-        
       $devices = @($layout.GetPlotDeviceNames())
       $preferredDevices = @(
         "DWG To PDF.pc3",
@@ -189,7 +189,7 @@ try {
         }
       }
 
-      # Проверка формата листа
+      #                       
       $availableMedia = @($layout.GetCanonicalMediaNames())
       if ($availableMedia.Count -gt 0) {
         $curMedia = $layout.CanonicalMediaName
@@ -224,7 +224,7 @@ try {
     }
   }
 
-  # Если в чертеже только пространство модели (Model Space)
+  #                                           (Model Space)
   if ($pagePdfPaths.Count -eq 0) {
     $layout = $document.ModelSpace.Layout
     $devices = @($layout.GetPlotDeviceNames())
@@ -265,10 +265,10 @@ try {
   }
 
   if ($pagePdfPaths.Count -eq 0) {
-    throw "AutoCAD не смог сгенерировать ни одного листа PDF для чертежа."
+    throw "AutoCAD                                       PDF            ."
   }
 
-  # Объединение страниц в единый многостраничный PDF
+  #                                              PDF
   $tempCombinedPdf = Join-Path $tempDir "combined.pdf"
   if ($pagePdfPaths.Count -eq 1) {
     Copy-Item -LiteralPath $pagePdfPaths[0] -Destination $tempCombinedPdf -Force
@@ -307,11 +307,11 @@ except ImportError:
     $pyProc.WaitForExit(120000)
     if ($pyProc.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $tempCombinedPdf)) {
       $err = $pyProc.StandardError.ReadToEnd()
-      throw "Ошибка объединения страниц PDF: $err"
+      throw "                           PDF: $err"
     }
   }
 
-  # Сохранение в целевую папку рядом с DWG или резервный кэш
+  #                                    DWG                  
   $finalDestination = $OutputPath
   $writeSuccess = $false
   try {
@@ -324,7 +324,7 @@ except ImportError:
       $finalDestination = $FallbackCachePath
       $writeSuccess = $true
     } else {
-      throw "Не удалось сохранить PDF в целевую папку '$OutputPath': $_"
+      throw "                     PDF                 '$OutputPath': $_"
     }
   }
 

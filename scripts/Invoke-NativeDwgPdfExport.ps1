@@ -1,4 +1,4 @@
-# Invoke-NativeDwgPdfExport.ps1 — shared native AutoCAD PDF export helper via accoreconsole.exe
+# Invoke-NativeDwgPdfExport.ps1 - shared native AutoCAD PDF export helper via accoreconsole.exe
 # ASCII-only encoding for PowerShell 5.1 compatibility.
 
 $script:NativeExportAccorePath = ""
@@ -53,11 +53,11 @@ function Invoke-NativeDwgPdfExport {
     [string]$LayoutName = "Layout1"
   )
   if (-not (Test-Path -LiteralPath $InputPath -PathType Leaf)) {
-    throw "DWG-файл не найден: $InputPath"
+    throw "DWG file not found: $InputPath"
   }
   $accore = Find-NativeAccoreConsole
   if (-not $accore) {
-    throw "accoreconsole.exe не найден"
+    throw "accoreconsole.exe not found"
   }
   try { New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null } catch {}
   try { Remove-Item -LiteralPath $OutputPdf -Force -ErrorAction SilentlyContinue } catch {}
@@ -65,21 +65,20 @@ function Invoke-NativeDwgPdfExport {
   $scrFile = Join-Path $WorkDir "native_export.scr"
   $consoleLog = Join-Path $WorkDir "native_export.log"
 
-  # AutoCAD Script: check layout, export to vector PDF, exit without saving
+  $normalizedOut = $OutputPdf.Replace('\', '/')
   $scriptLines = @(
     '(setvar "EXPERT" 5)',
     '(setvar "BACKGROUNDPLOT" 0)',
-    ('(princ (strcat "LAYOUTCHECK:" (if (tblsearch "LAYOUT" "{0}") "FOUND" "MISSING")))' -f $LayoutName),
-    ('if (= (getvar "CTAB") "Model") (progn (if (tblsearch "LAYOUT" "{0}") (setvar "CTAB" "{0}"))))' -f $LayoutName),
-    '_.-EXPORT',
-    '_PDF',
-    '_C',
-    '_N',
-    ('"{0}"' -f $OutputPdf),
+    '(setvar "FILEDIA" 0)',
+    '(setvar "CMDDIA" 0)',
+    '(if (= (getvar "CTAB") "Model")',
+    ('  (command "_.-EXPORT" "_PDF" "_E" "_N" "{0}")' -f $normalizedOut),
+    ('  (command "_.-EXPORT" "_PDF" "_C" "_N" "{0}")' -f $normalizedOut),
+    ')',
     '_QUIT',
-    '_N'
+    '_Y'
   )
-  [System.IO.File]::WriteAllLines($scrFile, $scriptLines, [System.Text.UTF8Encoding]::new($false))
+  [System.IO.File]::WriteAllLines($scrFile, $scriptLines, [System.Text.Encoding]::ASCII)
 
   $sw = [System.Diagnostics.Stopwatch]::StartNew()
   $runStart = Get-Date
@@ -99,7 +98,7 @@ function Invoke-NativeDwgPdfExport {
     $errTask = $proc.StandardError.ReadToEndAsync()
     if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
       try { $proc.Kill() } catch {}
-      throw ("Таймаут консоли AutoCAD Core Console ({0} сек)" -f $TimeoutSec)
+      throw ("AutoCAD Core Console timeout ({0} sec)" -f $TimeoutSec)
     }
     try { ($outTask.Result + "`n" + $errTask.Result) | Out-File -LiteralPath $consoleLog -Encoding utf8 -Force } catch {}
   } finally {
@@ -108,44 +107,11 @@ function Invoke-NativeDwgPdfExport {
   }
 
   if (-not (Test-Path -LiteralPath $OutputPdf)) {
-    # If Layout1 export didn't create file (e.g. model space drawing), try exporting Model space directly
-    $scrModel = Join-Path $WorkDir "native_model.scr"
-    $scriptModelLines = @(
-      '(setvar "EXPERT" 5)',
-      '(setvar "BACKGROUNDPLOT" 0)',
-      '(setvar "CTAB" "Model")',
-      '_.-EXPORT',
-      '_PDF',
-      '_D',
-      '_N',
-      ('"{0}"' -f $OutputPdf),
-      '_QUIT',
-      '_N'
-    )
-    [System.IO.File]::WriteAllLines($scrModel, $scriptModelLines, [System.Text.UTF8Encoding]::new($false))
-    $psiModel = New-Object System.Diagnostics.ProcessStartInfo
-    $psiModel.FileName = $accore
-    $psiModel.Arguments = ('/i "{0}" /s "{1}"' -f $InputPath, $scrModel)
-    $psiModel.UseShellExecute = $false
-    $psiModel.CreateNoWindow = $true
-    $psiModel.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
-    $procM = [System.Diagnostics.Process]::Start($psiModel)
-    try {
-      if (-not $procM.WaitForExit($TimeoutSec * 1000)) {
-        try { $procM.Kill() } catch {}
-      }
-    } finally {
-      try { if (-not $procM.HasExited) { $procM.Kill() } } catch {}
-      try { $procM.Dispose() } catch {}
-    }
-  }
-
-  if (-not (Test-Path -LiteralPath $OutputPdf)) {
-    throw "AutoCAD Core Console завершила работу, но PDF-файл не был создан."
+    throw "AutoCAD Core Console finished but PDF was not created"
   }
   $info = Get-Item -LiteralPath $OutputPdf
   if ($info.Length -le 1024) {
-    throw "Созданный PDF-файл пуст или поврежден (размер менее 1 КБ)."
+    throw "Created PDF is empty or corrupt (<1KB)"
   }
   return [ordered]@{
     ok = $true

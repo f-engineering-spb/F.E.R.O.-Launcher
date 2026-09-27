@@ -1302,8 +1302,7 @@ async function previewFileDirectly(node, options = {}) {
     } else {
       item = {
         ...node,
-        previewType: "IMAGE",
-        url: `/api/dwg/thumbnail?path=${encodeURIComponent(node.path)}`,
+        previewType: "DWG_MODEL",
         previewFor: { type: "DWG", name: node.name, path: node.path },
       };
     }
@@ -2093,8 +2092,7 @@ function collectPreviewFilesForDisplay() {
       } else {
         result.push({
           ...node,
-          previewType: "IMAGE",
-          url: `/api/dwg/thumbnail?path=${encodeURIComponent(node.path)}`,
+          previewType: "DWG_MODEL",
           previewFor: {
             type: "DWG",
             name: node.name,
