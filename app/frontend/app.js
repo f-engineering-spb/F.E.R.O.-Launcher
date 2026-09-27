@@ -481,7 +481,15 @@ async function openFileByPath(path, action) {
     if (payload.longPathWarning) showNotice(payload.longPathWarning);
   } catch (error) {
     console.error("[Launcher] Failed to open file:", error);
-    showOperationError(error);
+    const msg = error && error.message ? error.message : String(error);
+    if (msg.includes("APP_NOT_CONFIGURED")) {
+      showNotice("⚠️ Путь к программе не указан в меню «Параметры». Пожалуйста, укажите путь к .exe в настройках.");
+      if (typeof openSettingsModal === "function") {
+        openSettingsModal();
+      }
+    } else {
+      showOperationError(error);
+    }
   }
 }
 

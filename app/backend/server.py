@@ -1922,8 +1922,43 @@ def launch_system_default(path: Path) -> str:
             raise RuntimeError(f"Не удалось открыть программой по умолчанию: {err2}")
 
 
+def get_configured_exe_for_path(path: Path) -> str:
+    """Возвращает настроенный путь к EXE для типа файла из native_apps.json.
+    Если путь не задан или файл не существует — возвращает пустую строку."""
+    if path.is_dir():
+        return ""
+    suffix = path.suffix.casefold()
+    cfg = load_native_apps_config()
+    
+    candidate = str(cfg.get(suffix, "")).strip()
+    if not candidate:
+        if suffix in {".dwg", ".dxf"}:
+            candidate = str(cfg.get("settingDwgExe", "") or cfg.get(".dwg", "") or cfg.get(".dxf", "")).strip()
+        elif suffix in {".pdf"}:
+            candidate = str(cfg.get("settingPdfExe", "") or cfg.get(".pdf", "")).strip()
+        elif suffix in {".doc", ".docx", ".rtf", ".odt"}:
+            candidate = str(cfg.get("settingWordExe", "") or cfg.get(".docx", "") or cfg.get(".doc", "")).strip()
+        elif suffix in {".xls", ".xlsx", ".xlsm", ".csv", ".ods"}:
+            candidate = str(cfg.get("settingExcelExe", "") or cfg.get(".xlsx", "") or cfg.get(".xls", "")).strip()
+        elif suffix in {".ppt", ".pptx", ".odp"}:
+            candidate = str(cfg.get("settingPptExe", "")).strip()
+        elif suffix in {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".tif", ".tiff", ".ico", ".svg"}:
+            candidate = str(cfg.get("settingImgExe", "")).strip()
+        elif suffix in {".zip", ".rar", ".7z", ".tar", ".gz"}:
+            candidate = str(cfg.get("settingArchExe", "")).strip()
+        elif suffix in {".txt", ".log", ".ini", ".cfg", ".json", ".xml", ".yaml", ".yml"}:
+            candidate = str(cfg.get("settingTxtExe", "")).strip()
+        elif suffix in {".mp4", ".avi", ".mov", ".mkv", ".mp3", ".wav"}:
+            candidate = str(cfg.get("settingMediaExe", "")).strip()
+            
+    if candidate and Path(candidate).is_file():
+        return str(Path(candidate).resolve())
+    return ""
+
+
 def launch_native_file(path: Path) -> str:
-    """Запустить файл в ассоциированной программе, либо открыть в проводнике Windows."""
+    """Запустить файл строго в настроенной программе из «Параметров».
+    Если путь не задан или файл программы не найден — возбуждает ValueError."""
     if not path.exists():
         raise FileNotFoundError(f"Файл или папка не найдены: {path}")
 
@@ -1932,38 +1967,20 @@ def launch_native_file(path: Path) -> str:
     if path.is_dir():
         return open_in_explorer(path)
 
-    # 1. Проверяем переключатель «Открыть в нативной программе» и пути
     suffix = path.suffix.casefold()
-    cfg = load_native_apps_config()
-    use_native = bool(cfg.get("useNativeApps", True))
+    custom_exe = get_configured_exe_for_path(path)
+    if not custom_exe or not Path(custom_exe).is_file():
+        ext_label = suffix.upper() if suffix else 'файлов данного типа'
+        raise ValueError(f"APP_NOT_CONFIGURED: Путь к программе для {ext_label} не указан или неверен в меню «Параметры».")
 
-    if use_native and suffix in {".dwg", ".dxf"}:
-        dwg_exe = str(
-            cfg.get(suffix, "")
-            or cfg.get(".dwg", "")
-            or cfg.get(".dxf", "")
-            or cfg.get("settingDwgExe", "")
-        ).strip()
-        if not dwg_exe or not Path(dwg_exe).exists():
-            raise ValueError("Не найден AutoCAD, укажите путь в настройках")
-
-    if use_native:
-        custom_exe = str(
-            cfg.get(suffix, "")
-            or (dwg_exe if suffix in {".dwg", ".dxf"} else "")
-        ).strip()
-        if custom_exe and Path(custom_exe).exists():
-            try:
-                exe_path = str(Path(custom_exe).resolve())
-                proc = subprocess.Popen([exe_path, resolved], cwd=str(Path(exe_path).parent))
-                bring_native_window_to_front(proc.pid, exe_path)
-                _bring_window_to_front(None, None, 120.0, Path(resolved).name, 3)
-                return f"custom-app:{Path(exe_path).name}"
-            except Exception as err:
-                pass
-
-    # 2. Если переключатель выключен, путь не задан или программа не запустилась — открываем проводник
-    return open_in_explorer(path)
+    try:
+        exe_path = str(Path(custom_exe).resolve())
+        proc = subprocess.Popen([exe_path, resolved], cwd=str(Path(exe_path).parent))
+        bring_native_window_to_front(proc.pid, exe_path)
+        _bring_window_to_front(None, None, 120.0, Path(resolved).name, 3)
+        return f"custom-app:{Path(exe_path).name}"
+    except Exception as err:
+        raise RuntimeError(f"Не удалось запустить {Path(custom_exe).name}: {err}")
 
 
 NATIVE_OPEN_LOG_LOCK = threading.Lock()
@@ -3344,9 +3361,9 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 action = str(body.get("action", "") or "default").strip().lower()
                 if action == "explorer":
                     mode = open_in_explorer(target)
-                elif action == "system":
-                    mode = launch_system_default(target)
                 else:
+                    # Для любых попыток открыть файл в программе ('system' или 'native')
+                    # строго проверяем настроенный путь в меню «Параметры»
                     mode = launch_native_file(target)
                 append_native_open_log(
                     {
