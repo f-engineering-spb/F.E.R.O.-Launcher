@@ -28,14 +28,20 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from app.backend.server import (
+    ALL_SUPPORTED_EXTENSIONS,
     FORBIDDEN_AUTODETECT_EXES,
     NativeOpenError,
     detect_windows_app_for_ext,
+    ensure_native_apps_first_run_initialized,
     get_configured_app_for_extension,
+    import_windows_default_app_mappings,
     launch_custom_app,
     launch_native_file,
     launch_system_default,
+    load_native_apps_config,
+    migrate_and_normalize_apps_config,
     normalize_file_extension,
+    save_native_apps_config,
     validate_configured_executable,
 )
 
@@ -246,6 +252,165 @@ class TestNativeOpenContract(unittest.TestCase):
         is_val, clean = validate_configured_executable("")
         self.assertFalse(is_val)
 
+    def test_13_first_run_missing_config_initializes_from_windows(self):
+        """13. When config file does not exist, ensure_native_apps_first_run_initialized imports Windows defaults safely."""
+        config_path = self.base_dir / "native_apps.json"
+
+        def mock_detect(ext):
+            if ext == ".pdf":
+                return str(self.fake_viewer_exe)
+            if ext == ".dwg":
+                return "C:\\Autodesk\\AcLauncher.exe"  # Must be rejected!
+            return ""
+
+        with patch("app.backend.server.NATIVE_APPS_CONFIG_FILE", config_path), \
+             patch("app.backend.server.detect_windows_app_for_ext", side_effect=mock_detect):
+            res = ensure_native_apps_first_run_initialized()
+            self.assertIsInstance(res, dict)
+            self.assertTrue(config_path.exists())
+
+            loaded = load_native_apps_config()
+            self.assertTrue(loaded.get("firstRunCompleted"))
+            self.assertEqual(loaded.get("version"), 2)
+            # PDF was imported
+            pdf_entry = loaded.get(".pdf")
+            self.assertIsInstance(pdf_entry, dict)
+            self.assertEqual(pdf_entry.get("path"), str(self.fake_viewer_exe))
+            self.assertEqual(pdf_entry.get("source"), "windows_import")
+            # DWG launcher was rejected, path remains empty
+            self.assertEqual(loaded.get(".dwg", {}).get("path", ""), "")
+
+    def test_14_second_run_preserves_manual_config(self):
+        """14. When firstRunCompleted is True, startup does not re-import and retains existing manual config."""
+        config_path = self.base_dir / "native_apps.json"
+        initial_cfg = {
+            "version": 2,
+            "firstRunCompleted": True,
+            "useNativeApps": True,
+            ".dwg": {
+                "path": str(self.fake_viewer_exe),
+                "source": "manual",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "valid_at_save": True,
+            },
+        }
+        import json
+        config_path.write_text(json.dumps(initial_cfg), encoding="utf-8")
+
+        with patch("app.backend.server.NATIVE_APPS_CONFIG_FILE", config_path), \
+             patch("app.backend.server.detect_windows_app_for_ext") as mock_detect:
+            res = ensure_native_apps_first_run_initialized()
+            self.assertIsInstance(res, dict)
+            mock_detect.assert_not_called()
+
+            loaded = load_native_apps_config()
+            self.assertEqual(get_configured_app_for_extension(".dwg", loaded), str(self.fake_viewer_exe))
+
+    def test_15_legacy_string_migration_is_pure(self):
+        """15. migrate_and_normalize_apps_config migrates flat string configs to dicts in-memory without side effects."""
+        raw_legacy = {
+            "useNativeApps": True,
+            ".dwg": str(self.fake_viewer_exe),
+            ".pdf": "C:\\Program Files\\Adobe\\Acrobat.exe",
+        }
+        migrated, had_legacy = migrate_and_normalize_apps_config(raw_legacy)
+        self.assertTrue(had_legacy)
+        self.assertIsInstance(migrated[".dwg"], dict)
+        self.assertEqual(migrated[".dwg"]["path"], str(self.fake_viewer_exe))
+        self.assertEqual(migrated[".dwg"]["source"], "manual")
+        self.assertTrue(migrated[".dwg"]["valid_at_save"])
+
+        self.assertIsInstance(migrated[".pdf"], dict)
+        self.assertEqual(migrated[".pdf"]["path"], "C:\\Program Files\\Adobe\\Acrobat.exe")
+        self.assertEqual(migrated[".pdf"]["source"], "manual")
+
+        # Original dict should not be mutated
+        self.assertIsInstance(raw_legacy[".dwg"], str)
+
+    def test_16_fill_empty_mode_preserves_existing_values(self):
+        """16. fill_empty mode populates only empty slots and leaves non-empty user settings untouched."""
+        existing_cfg = {
+            "version": 2,
+            "firstRunCompleted": True,
+            "useNativeApps": True,
+            ".dwg": {
+                "path": str(self.fake_viewer_exe),
+                "source": "manual",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "valid_at_save": True,
+            },
+        }
+
+        def mock_detect(ext):
+            if ext == ".dwg":
+                return str(self.fake_acad_exe)  # Should NOT overwrite fake_viewer_exe!
+            if ext == ".pdf":
+                return str(self.fake_acad_exe)  # Empty slot, should be filled
+            return ""
+
+        with patch("app.backend.server.detect_windows_app_for_ext", side_effect=mock_detect):
+            updated, report = import_windows_default_app_mappings("fill_empty", existing_cfg, save=False)
+            # DWG was skipped because not empty
+            self.assertEqual(report["details"][".dwg"]["reason"], "already_configured")
+            self.assertEqual(updated[".dwg"]["path"], str(self.fake_viewer_exe))
+            # PDF was filled
+            self.assertIn(".pdf", report["updated"])
+            self.assertEqual(updated[".pdf"]["path"], str(self.fake_acad_exe))
+            self.assertEqual(updated[".pdf"]["source"], "windows_import")
+
+    def test_17_replace_confirmed_mode_rejects_aclauncher_and_preserves_dwg(self):
+        """17. replace_confirmed mode replaces existing valid values, BUT if Windows returns AcLauncher for DWG, it is NOT cleared."""
+        existing_cfg = {
+            "version": 2,
+            "firstRunCompleted": True,
+            "useNativeApps": True,
+            ".dwg": {
+                "path": str(self.fake_viewer_exe),
+                "source": "manual",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "valid_at_save": True,
+            },
+            ".pdf": {
+                "path": str(self.fake_viewer_exe),
+                "source": "manual",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "valid_at_save": True,
+            }
+        }
+
+        def mock_detect(ext):
+            if ext == ".dwg":
+                return "C:\\Autodesk\\AcLauncher.exe"  # Unusable launcher
+            if ext == ".pdf":
+                return str(self.fake_acad_exe)  # Usable replacement
+            return ""
+
+        with patch("app.backend.server.detect_windows_app_for_ext", side_effect=mock_detect):
+            updated, report = import_windows_default_app_mappings("replace_confirmed", existing_cfg, save=False)
+            # DWG launcher is rejected, existing DWG Viewer is kept!
+            self.assertEqual(report["details"][".dwg"]["reason"], "no_usable_windows_association")
+            self.assertEqual(updated[".dwg"]["path"], str(self.fake_viewer_exe))
+            # PDF is replaced
+            self.assertIn(".pdf", report["updated"])
+            self.assertEqual(updated[".pdf"]["path"], str(self.fake_acad_exe))
+
+    def test_18_pure_load_config_has_no_side_effects(self):
+        """18. load_native_apps_config is pure read/migration: no autodetect, no file writes."""
+        config_path = self.base_dir / "native_apps.json"
+        config_path.write_text('{"useNativeApps": true, ".dwg": "C:\\\\acad.exe"}', encoding="utf-8")
+        stat_before = config_path.stat().st_mtime_ns
+
+        with patch("app.backend.server.NATIVE_APPS_CONFIG_FILE", config_path), \
+             patch("app.backend.server.detect_windows_app_for_ext") as mock_detect, \
+             patch("app.backend.server.save_native_apps_config") as mock_save:
+            cfg = load_native_apps_config()
+            mock_detect.assert_not_called()
+            mock_save.assert_not_called()
+            self.assertEqual(config_path.stat().st_mtime_ns, stat_before)
+            self.assertIsInstance(cfg.get(".dwg"), dict)
+            self.assertEqual(cfg[".dwg"]["path"], "C:\\acad.exe")
+
 
 if __name__ == "__main__":
     unittest.main()
+

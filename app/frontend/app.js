@@ -116,7 +116,10 @@ const els = {
   settingsModal: document.getElementById("settingsModal"),
   settingsCloseBtn: document.getElementById("settingsCloseBtn"),
   settingsCancelBtn: document.getElementById("settingsCancelBtn"),
-  settingsAutoDetectBtn: document.getElementById("settingsAutoDetectBtn"),
+  settingsFillEmptyBtn: document.getElementById("settingsFillEmptyBtn"),
+  settingsReplaceBtn: document.getElementById("settingsReplaceBtn"),
+  settingsOpenWinSettingsBtn: document.getElementById("settingsOpenWinSettingsBtn"),
+  settingsDwgHint: document.getElementById("settingsDwgHint"),
   settingsSaveBtn: document.getElementById("settingsSaveBtn"),
 
 };
@@ -4560,12 +4563,20 @@ async function loadAppSettings() {
   return state.appSettings;
 }
 
+function extractAppPath(val) {
+  if (!val) return "";
+  if (typeof val === "object" && val !== null) {
+    return String(val.path || "").trim();
+  }
+  return String(val || "").trim();
+}
+
 function settingsCustomExe(extension) {
   if (!extension) return "";
   const raw = String(extension).trim().toLowerCase();
   const withDot = raw.startsWith(".") ? raw : "." + raw;
   const withoutDot = raw.startsWith(".") ? raw.slice(1) : raw;
-  return String(
+  const val =
     state.appSettings?.[withDot] ||
     state.appSettings?.[withoutDot] ||
     state.appSettings?.[withDot.toUpperCase()] ||
@@ -4579,8 +4590,8 @@ function settingsCustomExe(extension) {
     ([".zip", ".rar", ".7z", ".tar", ".gz"].includes(withDot) ? state.appSettings?.settingArchExe : "") ||
     ([".txt", ".log", ".ini", ".cfg", ".json", ".xml", ".yaml", ".yml"].includes(withDot) ? state.appSettings?.settingTxtExe : "") ||
     ([".mp4", ".avi", ".mov", ".mkv", ".mp3", ".wav"].includes(withDot) ? state.appSettings?.settingMediaExe : "") ||
-    ""
-  ).trim();
+    "";
+  return extractAppPath(val);
 }
 
 const NATIVE_APP_GROUPS = [
@@ -4600,7 +4611,7 @@ function renderSettingsAppRows(cfg) {
   if (!form) return;
   form.replaceChildren();
   for (const group of NATIVE_APP_GROUPS) {
-    const current = group.exts.map((e) => String(cfg?.[e] || "").trim()).find(Boolean) || "";
+    const current = group.exts.map((e) => extractAppPath(cfg?.[e])).find(Boolean) || "";
     const field = document.createElement("div");
     field.className = "settings-field";
     const label = document.createElement("label");
@@ -4629,7 +4640,13 @@ function renderSettingsAppRows(cfg) {
     clear.className = "settings-clear-btn";
     clear.title = "Очистить";
     clear.textContent = "✕";
-    clear.addEventListener("click", () => { input.value = ""; });
+    clear.addEventListener("click", () => {
+      input.value = "";
+      updateDwgHintVisibility();
+    });
+    input.addEventListener("input", () => {
+      if (group.id === "settingDwgExe") updateDwgHintVisibility();
+    });
     row.append(input, browse, clear);
     field.append(label, row);
     form.append(field);
@@ -4708,8 +4725,28 @@ document.addEventListener("keydown", (event) => {
 }, true);
 window.addEventListener("resize", () => hideFileContextMenu());
 
+function setDwgHint(message) {
+  const hint = document.getElementById("settingsDwgHint");
+  if (!hint) return;
+  if (message) {
+    hint.textContent = message;
+    hint.hidden = false;
+  } else {
+    hint.textContent = "";
+    hint.hidden = true;
+  }
+}
+
+function updateDwgHintVisibility() {
+  const dwgInput = document.getElementById("settingDwgExe");
+  if (!dwgInput || (dwgInput.value && dwgInput.value.trim())) {
+    setDwgHint("");
+  }
+}
+
 // Управление модальным окном "Параметры"
 async function openSettingsModal(highlightExt) {
+  setDwgHint("");
   try {
     const res = await fetch("/api/config/apps");
     if (res.ok) {
@@ -4742,61 +4779,136 @@ function closeSettingsModal() {
   if (els.settingsModal) els.settingsModal.hidden = true;
 }
 
-
-async function autoDetectWindowsApps() {
+function applyImportedToInputs(imported, onlyIfEmpty = false) {
+  if (!imported) return 0;
+  let count = 0;
   const inputs = Array.from(document.querySelectorAll("#settingsAppsForm .settings-input"));
-  const hasManualSettings = inputs.some((inp) => inp.value && inp.value.trim());
-
-  if (hasManualSettings) {
-    const confirmed = confirm(
-      "В настройках уже указаны программы. Заполнить/заменить настройки значениями по умолчанию из Windows?"
-    );
-    if (!confirmed) {
+  inputs.forEach((input) => {
+    if (onlyIfEmpty && input.value && input.value.trim()) {
       return;
     }
-  }
+    const exts = String(input.dataset.exts || "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
+    for (const ext of exts) {
+      const val = imported[ext];
+      const p = extractAppPath(val);
+      if (p) {
+        input.value = p;
+        input.classList.add("input-updated");
+        setTimeout(() => input.classList.remove("input-updated"), 1500);
+        count++;
+        break;
+      }
+    }
+  });
+  return count;
+}
 
-  const btn = document.getElementById("settingsAutoDetectBtn");
+async function fillEmptyFromWindows() {
+  const btn = document.getElementById("settingsFillEmptyBtn");
   const prevText = btn ? btn.textContent : "";
   if (btn) {
     btn.disabled = true;
-    btn.textContent = "⏳ Опрос ассоциаций Windows...";
+    btn.textContent = "⏳ Поиск в Windows...";
   }
-  showToast("Определение программ по умолчанию в Windows...");
   try {
-    const res = await fetch("/api/config/apps/autodetect", {
+    const res = await fetch("/api/config/apps/import-windows", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "fill_empty" })
+    });
+    if (!res.ok) {
+      throw new Error(`Ошибка сервера: HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    const count = applyImportedToInputs(data.imported || {}, true);
+    if (data.skipped?.[".dwg"] === "no_usable_windows_association") {
+      const dwgInput = document.getElementById("settingDwgExe");
+      if (!dwgInput || !dwgInput.value) {
+        setDwgHint("Windows вернула системный CAD launcher, а не фактическое приложение. Выберите DWG Viewer или AutoCAD вручную.");
+      }
+    } else {
+      updateDwgHintVisibility();
+    }
+
+    if (count > 0) {
+      showToast(`Заполнено пустых полей: ${count}. Не забудьте нажать «Сохранить»!`);
+    } else {
+      showToast("Все поля уже заполнены или Windows не вернула подходящих ассоциаций.");
+    }
+  } catch (err) {
+    showToast(`Ошибка импорта: ${err.message || err}`);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = prevText;
+    }
+  }
+}
+
+async function replaceFromWindows() {
+  const confirmed = confirm(
+    "Заменить сохранённые приложения программами по умолчанию Windows?\n\nСуществующие настройки для поддерживаемых типов файлов будут перезаписаны ассоциациями из Windows (при наличии пригодного приложения)."
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  const btn = document.getElementById("settingsReplaceBtn");
+  const prevText = btn ? btn.textContent : "";
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "⏳ Замена из Windows...";
+  }
+  try {
+    const res = await fetch("/api/config/apps/import-windows", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "replace_confirmed" })
+    });
+    if (!res.ok) {
+      throw new Error(`Ошибка сервера: HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    const count = applyImportedToInputs(data.imported || {}, false);
+    if (data.skipped?.[".dwg"] === "no_usable_windows_association") {
+      setDwgHint("Windows вернула системный CAD launcher, а не фактическое приложение. Выберите DWG Viewer или AutoCAD вручную.");
+    } else {
+      updateDwgHintVisibility();
+    }
+
+    if (count > 0) {
+      showToast(`Обновлено категорий из Windows: ${count}. Не забудьте нажать «Сохранить»!`);
+    } else {
+      showToast("Подходящих ассоциаций Windows не найдено.");
+    }
+  } catch (err) {
+    showToast(`Ошибка замены: ${err.message || err}`);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = prevText;
+    }
+  }
+}
+
+async function openWindowsSettings() {
+  const btn = document.getElementById("settingsOpenWinSettingsBtn");
+  const prevText = btn ? btn.textContent : "";
+  if (btn) {
+    btn.disabled = true;
+  }
+  try {
+    const res = await fetch("/api/config/apps/open-windows-settings", {
       method: "POST",
       headers: { Accept: "application/json" }
     });
     if (!res.ok) {
-      throw new Error(`Сервер вернул статус HTTP ${res.status}`);
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.error || `HTTP ${res.status}`);
     }
-    const data = await res.json();
-    const detected = data.detected || {};
-    let filledCount = 0;
-    inputs.forEach((input) => {
-      const exts = String(input.dataset.exts || "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
-      for (const ext of exts) {
-        if (detected[ext]) {
-          input.value = detected[ext];
-          filledCount++;
-          break;
-        }
-      }
-    });
-
-    const dwgInput = document.getElementById("settingDwgExe");
-    if (dwgInput && !dwgInput.value) {
-      showNotice("Для DWG укажите прямой путь к DWG Viewer или AutoCAD через «Обзор…»");
-    }
-
-    if (filledCount > 0) {
-      showToast(`Успешно заполнено категорий: ${filledCount}. Нажмите «Сохранить»!`);
-    } else {
-      showToast("В Windows не найдены явные файловые ассоциации или программы отсутствуют.");
-    }
+    showToast("Открываем параметры приложений Windows…");
   } catch (err) {
-    showToast(`Ошибка автоопределения: ${err.message || err}`);
+    showToast(`Не удалось открыть параметры Windows: ${err.message || err}`);
   } finally {
     if (btn) {
       btn.disabled = false;
@@ -4862,6 +4974,7 @@ async function browseExeForSetting(inputId) {
       input.value = data.path;
       input.classList.add("input-updated");
       setTimeout(() => input.classList.remove("input-updated"), 1500);
+      updateDwgHintVisibility();
     } else if (data.error && !data.cancelled && !data.timedOut) {
       showOperationError(new Error(data.error));
     }
@@ -4875,7 +4988,9 @@ async function browseExeForSetting(inputId) {
 if (els.btnSettings) els.btnSettings.addEventListener("click", openSettingsModal);
 if (els.settingsCloseBtn) els.settingsCloseBtn.addEventListener("click", closeSettingsModal);
 if (els.settingsCancelBtn) els.settingsCancelBtn.addEventListener("click", closeSettingsModal);
-if (els.settingsAutoDetectBtn) els.settingsAutoDetectBtn.addEventListener("click", autoDetectWindowsApps);
+if (els.settingsFillEmptyBtn) els.settingsFillEmptyBtn.addEventListener("click", fillEmptyFromWindows);
+if (els.settingsReplaceBtn) els.settingsReplaceBtn.addEventListener("click", replaceFromWindows);
+if (els.settingsOpenWinSettingsBtn) els.settingsOpenWinSettingsBtn.addEventListener("click", openWindowsSettings);
 if (els.settingsSaveBtn) els.settingsSaveBtn.addEventListener("click", saveSettings);
 if (els.settingsModal) {
   els.settingsModal.addEventListener("click", (event) => {
@@ -4892,7 +5007,10 @@ document.querySelectorAll(".settings-clear-btn").forEach((btn) => {
   btn.addEventListener("click", () => {
     const targetId = btn.dataset.target;
     const input = document.getElementById(targetId);
-    if (input) input.value = "";
+    if (input) {
+      input.value = "";
+      updateDwgHintVisibility();
+    }
   });
 });
 

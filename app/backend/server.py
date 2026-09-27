@@ -1281,6 +1281,8 @@ NATIVE_APPS_CONFIG_FILE = RUNTIME_DIR / "native_apps.json"
 DEFAULT_NATIVE_APPS: dict[str, Any] = {
     "useNativeApps": True,
     "defaultAction": "explorer",
+    "firstRunCompleted": False,
+    "version": 2,
     ".dwg": "",
     ".dxf": "",
     ".pdf": "",
@@ -1327,23 +1329,16 @@ DEFAULT_NATIVE_APPS: dict[str, Any] = {
     ".wav": "",
 }
 
-def load_native_apps_config() -> dict[str, Any]:
-    if NATIVE_APPS_CONFIG_FILE.exists():
-        try:
-            with open(NATIVE_APPS_CONFIG_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                    cfg = dict(DEFAULT_NATIVE_APPS)
-                    cfg.update(data)
-                    return cfg
-        except Exception as err:
-            pass
-    return dict(DEFAULT_NATIVE_APPS)
-
-def save_native_apps_config(data: dict[str, Any]) -> None:
-    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-    with open(NATIVE_APPS_CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+ALL_SUPPORTED_EXTENSIONS: list[str] = [
+    ".dwg", ".dxf", ".pdf",
+    ".docx", ".doc", ".rtf", ".odt",
+    ".xlsx", ".xls", ".xlsm", ".csv", ".ods",
+    ".pptx", ".ppt", ".odp",
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".ico", ".svg",
+    ".zip", ".rar", ".7z", ".tar", ".gz",
+    ".txt", ".log", ".ini", ".cfg", ".json", ".xml", ".yaml", ".yml",
+    ".mp4", ".avi", ".mov", ".mkv", ".mp3", ".wav",
+]
 
 
 class NativeOpenError(RuntimeError):
@@ -1414,6 +1409,179 @@ def validate_configured_executable(exe_path: str) -> tuple[bool, str]:
     return True, cleaned
 
 
+def _extract_app_path(val: Any) -> str:
+    """Извлекает строковый путь к приложению из объекта или строки."""
+    if isinstance(val, dict):
+        return str(val.get("path", "") or "").strip()
+    if isinstance(val, str):
+        return val.strip()
+    return ""
+
+
+try:
+    import winreg
+except ImportError:
+    winreg = None
+
+
+def _get_command_from_progid(progid: str) -> str:
+    if not winreg or not progid:
+        return ""
+    keys_to_try = [
+        f"{progid}\\shell\\open\\command",
+        f"{progid}\\shell\\Open\\command",
+        f"{progid}\\shell\\edit\\command",
+    ]
+    for subkey in keys_to_try:
+        try:
+            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, subkey) as k:
+                val, _ = winreg.QueryValueEx(k, "")
+                cleaned = _clean_configured_exe_path(val)
+                if cleaned:
+                    if Path(cleaned).name.casefold() in FORBIDDEN_AUTODETECT_EXES:
+                        return ""
+                    return cleaned
+        except OSError:
+            pass
+    return ""
+
+
+def detect_windows_app_for_ext(ext: str) -> str:
+    """Определяет установленную в Windows программу по умолчанию для расширения."""
+    if not winreg:
+        return ""
+    norm_ext = normalize_file_extension(ext)
+    if not norm_ext:
+        return ""
+
+    candidate = ""
+    # 1. UserChoice (Windows 10 / 11 modern default)
+    user_choice = f"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\{norm_ext}\\UserChoice"
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, user_choice) as k:
+            progid, _ = winreg.QueryValueEx(k, "ProgId")
+            res = _get_command_from_progid(progid)
+            if res:
+                candidate = res
+    except OSError:
+        pass
+
+    # 2. HKEY_CLASSES_ROOT default ProgID
+    if not candidate:
+        try:
+            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, norm_ext) as k:
+                progid = winreg.QueryValue(k, "")
+                res = _get_command_from_progid(progid)
+                if res:
+                    candidate = res
+        except OSError:
+            pass
+
+    # 3. OpenWithProgids
+    if not candidate:
+        openwith = f"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\{norm_ext}\\OpenWithProgids"
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, openwith) as k:
+                i = 0
+                while True:
+                    try:
+                        name, _, _ = winreg.EnumValue(k, i)
+                        res = _get_command_from_progid(name)
+                        if res:
+                            candidate = res
+                            break
+                        i += 1
+                    except (OSError, ValueError, TypeError):
+                        break
+        except OSError:
+            pass
+
+    if candidate:
+        exe_file = Path(candidate).name.casefold()
+        if exe_file in FORBIDDEN_AUTODETECT_EXES:
+            return ""
+        if Path(candidate).is_file():
+            return candidate
+
+    return ""
+
+
+def migrate_and_normalize_apps_config(raw_data: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Мигрирует старые строковые значения в объектный формат {path, source, updated_at, valid_at_save}.
+
+    Не вызывает autodetect, не пишет на диск.
+    Возвращает (migrated_cfg, had_legacy_or_unmigrated: bool).
+    """
+    if not isinstance(raw_data, dict):
+        raw_data = {}
+    cfg: dict[str, Any] = dict(DEFAULT_NATIVE_APPS)
+    had_legacy = False
+
+    # Копируем служебные флаги
+    cfg["useNativeApps"] = bool(raw_data.get("useNativeApps", True))
+    cfg["defaultAction"] = str(raw_data.get("defaultAction", "explorer"))
+    cfg["firstRunCompleted"] = bool(raw_data.get("firstRunCompleted", False))
+    cfg["version"] = int(raw_data.get("version", 2))
+
+    now_iso = datetime.now().isoformat(timespec="seconds")
+
+    for key, val in raw_data.items():
+        if key in {"useNativeApps", "defaultAction", "firstRunCompleted", "version"}:
+            continue
+        if isinstance(val, dict):
+            path_str = _extract_app_path(val)
+            source = str(val.get("source", "manual") or "manual")
+            updated_at = str(val.get("updated_at", now_iso) or now_iso)
+            valid_at_save = bool(val.get("valid_at_save", True if path_str else False))
+            cfg[key] = {
+                "path": path_str,
+                "source": source,
+                "updated_at": updated_at,
+                "valid_at_save": valid_at_save,
+            }
+        elif isinstance(val, str):
+            path_str = val.strip()
+            had_legacy = True
+            is_valid = False
+            if path_str:
+                is_valid, _ = validate_configured_executable(path_str)
+            cfg[key] = {
+                "path": path_str,
+                "source": "manual",
+                "updated_at": now_iso,
+                "valid_at_save": is_valid,
+            }
+
+    return cfg, had_legacy
+
+
+def load_native_apps_config() -> dict[str, Any]:
+    """Чистое чтение и in-memory нормализация/миграция конфигурации приложений.
+
+    Никогда не вызывает autodetect.
+    Никогда не сохраняет на диск (no side-effects).
+    Никогда не перезаписывает ручные настройки пользователя.
+    """
+    if NATIVE_APPS_CONFIG_FILE.exists():
+        try:
+            with open(NATIVE_APPS_CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    migrated, _ = migrate_and_normalize_apps_config(data)
+                    return migrated
+        except Exception:
+            pass
+    migrated_default, _ = migrate_and_normalize_apps_config(DEFAULT_NATIVE_APPS)
+    return migrated_default
+
+
+def save_native_apps_config(data: dict[str, Any]) -> None:
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    migrated, _ = migrate_and_normalize_apps_config(data)
+    with open(NATIVE_APPS_CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(migrated, f, ensure_ascii=False, indent=2)
+
+
 def get_configured_app_for_extension(ext: str, cfg: dict | None = None) -> str:
     """Возвращает путь к настроенной программе для заданного расширения из cfg."""
     norm_ext = normalize_file_extension(ext)
@@ -1424,15 +1592,16 @@ def get_configured_app_for_extension(ext: str, cfg: dict | None = None) -> str:
 
     # Точное нормализованное расширение (например, ".dwg")
     val = cfg.get(norm_ext)
-    if val and str(val).strip():
-        return str(val).strip()
+    extracted = _extract_app_path(val)
+    if extracted:
+        return extracted
 
     # Варианты без точки / в верхнем регистре для обратной совместимости
     no_dot = norm_ext.lstrip(".")
     for key in (no_dot, norm_ext.upper(), no_dot.upper()):
-        val = cfg.get(key)
-        if val and str(val).strip():
-            return str(val).strip()
+        extracted = _extract_app_path(cfg.get(key))
+        if extracted:
+            return extracted
 
     # Специализированные ключи формы setting...Exe
     fallback_key = ""
@@ -1456,11 +1625,177 @@ def get_configured_app_for_extension(ext: str, cfg: dict | None = None) -> str:
         fallback_key = "settingMediaExe"
 
     if fallback_key and cfg.get(fallback_key):
-        val = cfg.get(fallback_key)
-        if val and str(val).strip():
-            return str(val).strip()
+        extracted = _extract_app_path(cfg.get(fallback_key))
+        if extracted:
+            return extracted
 
     return ""
+
+
+def import_windows_default_app_mappings(
+    mode: str = "fill_empty",
+    cfg: dict | None = None,
+    save: bool = True
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Центральный бэкенд-механизм импорта ассоциаций Windows.
+
+    mode строго:
+      - 'fill_empty': читает Windows associations, заполняет только пустые поля,
+                      никогда не меняет существующие ручные или валидные настройки.
+      - 'replace_confirmed': читает Windows associations, заменяет сохранённые поля
+                             ТОЛЬКО на реально существующий, валидный, не запрещённый EXE.
+                             Если Windows ассоциация непригодна/отсутствует, существующее поле НЕ очищается.
+    """
+    if mode not in {"fill_empty", "replace_confirmed"}:
+        raise ValueError(f"Недопустимый режим импорта: {mode}")
+
+    if cfg is None:
+        cfg = load_native_apps_config()
+    else:
+        cfg, _ = migrate_and_normalize_apps_config(cfg)
+
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    updated_exts: list[str] = []
+    skipped_exts: list[str] = []
+    details: dict[str, Any] = {}
+
+    for ext in ALL_SUPPORTED_EXTENSIONS:
+        norm_ext = normalize_file_extension(ext)
+        curr_entry = cfg.get(norm_ext)
+        curr_path = _extract_app_path(curr_entry)
+
+        # Опрашиваем ассоциацию Windows
+        detected_exe = detect_windows_app_for_ext(norm_ext)
+
+        # Для DWG/DXF строгий запрет на AcLauncher и ZwLauncher
+        if norm_ext in {".dwg", ".dxf"}:
+            if Path(detected_exe).name.casefold() in FORBIDDEN_AUTODETECT_EXES:
+                detected_exe = ""
+
+        is_candidate_usable, clean_candidate = validate_configured_executable(detected_exe)
+
+        if mode == "fill_empty":
+            if curr_path:
+                skipped_exts.append(norm_ext)
+                details[norm_ext] = {"path": curr_path, "status": "skipped", "reason": "already_configured"}
+                continue
+            if is_candidate_usable:
+                cfg[norm_ext] = {
+                    "path": clean_candidate,
+                    "source": "windows_import",
+                    "updated_at": now_iso,
+                    "valid_at_save": True,
+                }
+                updated_exts.append(norm_ext)
+                details[norm_ext] = {"path": clean_candidate, "status": "updated", "source": "windows_import"}
+            else:
+                skipped_exts.append(norm_ext)
+                details[norm_ext] = {"path": "", "status": "skipped", "reason": "no_usable_windows_association"}
+
+        elif mode == "replace_confirmed":
+            if is_candidate_usable:
+                cfg[norm_ext] = {
+                    "path": clean_candidate,
+                    "source": "windows_import",
+                    "updated_at": now_iso,
+                    "valid_at_save": True,
+                }
+                updated_exts.append(norm_ext)
+                details[norm_ext] = {"path": clean_candidate, "status": "updated", "source": "windows_import"}
+            else:
+                # ВАЖНО: Если ассоциация непригодна (например, AcLauncher), НЕ очищаем и НЕ заменяем существующее!
+                skipped_exts.append(norm_ext)
+                details[norm_ext] = {"path": curr_path, "status": "skipped", "reason": "no_usable_windows_association"}
+
+    if save:
+        save_native_apps_config(cfg)
+
+    imported_dict = {ext: details[ext] for ext in updated_exts}
+    skipped_dict = {ext: details[ext].get("reason", "skipped") for ext in skipped_exts}
+    report = {
+        "mode": mode,
+        "updated": updated_exts,
+        "skipped": skipped_exts,
+        "imported": imported_dict,
+        "skipped_reasons": skipped_dict,
+        "details": details,
+        "dwgHint": (
+            "Windows вернула системный CAD launcher, а не фактическое приложение. Выберите DWG Viewer или AutoCAD вручную."
+            if (not _extract_app_path(cfg.get(".dwg")) or details.get(".dwg", {}).get("reason") == "no_usable_windows_association")
+            else None
+        ),
+    }
+    return cfg, report
+    return cfg, report
+
+
+def ensure_native_apps_first_run_initialized() -> dict[str, Any]:
+    """Изолированный шаг первичной инициализации при первом старте backend (startup lifecycle).
+
+    Правила:
+    A. Config отсутствует:
+       - Создать пустой config
+       - import_windows_default_app_mappings("fill_empty")
+       - firstRunCompleted = True
+    B. Config существует в старом строковом формате:
+       - Мигрировать непустые строки в объектный формат (source="manual")
+       - Не выполнять автоматический Windows import
+       - firstRunCompleted = True
+       - Сохранить мигрированный конфиг
+    C. Config существует и содержит хотя бы один непустой application path:
+       - Это НЕ чистый first-run
+       - Не запускать autodetect автоматически
+       - firstRunCompleted = True
+    D. Config существует, все application paths пусты, firstRunCompleted == False:
+       - Разрешён один import_windows_default_app_mappings("fill_empty")
+       - firstRunCompleted = True
+    """
+    if not NATIVE_APPS_CONFIG_FILE.exists():
+        # Сценарий A: чистый первый запуск (файла нет)
+        cfg, _ = import_windows_default_app_mappings("fill_empty")
+        cfg["firstRunCompleted"] = True
+        save_native_apps_config(cfg)
+        return cfg
+
+    try:
+        with open(NATIVE_APPS_CONFIG_FILE, "r", encoding="utf-8") as f:
+            raw_data = json.load(f)
+    except Exception:
+        raw_data = {}
+
+    if not isinstance(raw_data, dict):
+        raw_data = {}
+
+    migrated, had_legacy = migrate_and_normalize_apps_config(raw_data)
+    already_completed = bool(migrated.get("firstRunCompleted", False))
+
+    non_empty_paths = [
+        _extract_app_path(migrated.get(ext))
+        for ext in ALL_SUPPORTED_EXTENSIONS
+        if _extract_app_path(migrated.get(ext))
+    ]
+
+    # Сценарий B: старый строковый формат с данными
+    if had_legacy and non_empty_paths:
+        migrated["firstRunCompleted"] = True
+        save_native_apps_config(migrated)
+        return migrated
+
+    # Сценарий C: уже есть хотя бы один путь
+    if non_empty_paths:
+        if not already_completed:
+            migrated["firstRunCompleted"] = True
+            save_native_apps_config(migrated)
+        return migrated
+
+    # Сценарий D: все пути пусты и firstRunCompleted == False
+    if not already_completed:
+        cfg, _ = import_windows_default_app_mappings("fill_empty", cfg=migrated)
+        cfg["firstRunCompleted"] = True
+        save_native_apps_config(cfg)
+        return cfg
+
+    return migrated
 
 def _force_foreground(hwnd: int, show_cmd: int = 9) -> bool:
     """Вывести окно на передний план и проверить результат.
@@ -2837,92 +3172,7 @@ def render_pdf_page(path: Path, page: int, dpi: int = DEFAULT_PDF_DPI, page_time
 
 
 
-try:
-    import winreg
-except ImportError:
-    winreg = None
 
-
-def _get_command_from_progid(progid: str) -> str:
-    if not winreg or not progid:
-        return ""
-    keys_to_try = [
-        f"{progid}\\shell\\open\\command",
-        f"{progid}\\shell\\Open\\command",
-        f"{progid}\\shell\\edit\\command",
-    ]
-    for subkey in keys_to_try:
-        try:
-            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, subkey) as k:
-                val, _ = winreg.QueryValueEx(k, "")
-                cleaned = _clean_configured_exe_path(val)
-                if cleaned:
-                    if Path(cleaned).name.casefold() in FORBIDDEN_AUTODETECT_EXES:
-                        return ""
-                    return cleaned
-        except OSError:
-            pass
-    return ""
-
-
-def detect_windows_app_for_ext(ext: str) -> str:
-    """Определяет установленную в Windows программу по умолчанию для расширения."""
-    if not winreg:
-        return ""
-    norm_ext = normalize_file_extension(ext)
-    if not norm_ext:
-        return ""
-
-    candidate = ""
-    # 1. UserChoice (Windows 10 / 11 modern default)
-    user_choice = f"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\{norm_ext}\\UserChoice"
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, user_choice) as k:
-            progid, _ = winreg.QueryValueEx(k, "ProgId")
-            res = _get_command_from_progid(progid)
-            if res:
-                candidate = res
-    except OSError:
-        pass
-
-    # 2. HKEY_CLASSES_ROOT default ProgID
-    if not candidate:
-        try:
-            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, norm_ext) as k:
-                progid = winreg.QueryValue(k, "")
-                res = _get_command_from_progid(progid)
-                if res:
-                    candidate = res
-        except OSError:
-            pass
-
-    # 3. OpenWithProgids
-    if not candidate:
-        openwith = f"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\{norm_ext}\\OpenWithProgids"
-        try:
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, openwith) as k:
-                i = 0
-                while True:
-                    try:
-                        name, _, _ = winreg.EnumValue(k, i)
-                        res = _get_command_from_progid(name)
-                        if res:
-                            candidate = res
-                            break
-                        i += 1
-                    except (OSError, ValueError, TypeError):
-                        break
-        except OSError:
-            pass
-
-    if candidate:
-        exe_file = Path(candidate).name.casefold()
-        if exe_file in FORBIDDEN_AUTODETECT_EXES:
-            return ""
-        if Path(candidate).is_file():
-            return candidate
-
-    return ""
 
 class LauncherHandler(BaseHTTPRequestHandler):
     server_version = "FEngineeringLauncherV3/0.1"
@@ -3237,10 +3487,53 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 body = self.read_json()
                 if not isinstance(body, dict):
                     raise ValueError("Ожидался JSON-объект")
-                save_native_apps_config(body)
+                current_cfg = load_native_apps_config()
+                save_data = dict(current_cfg)
+                save_data["useNativeApps"] = bool(body.get("useNativeApps", True))
+                save_data["firstRunCompleted"] = True
+                now_iso = datetime.now().isoformat(timespec="seconds")
+                for k, v in body.items():
+                    if k in {"useNativeApps", "defaultAction", "firstRunCompleted", "version"}:
+                        continue
+                    new_path = _extract_app_path(v)
+                    is_val, clean_p = validate_configured_executable(new_path)
+                    save_data[k] = {
+                        "path": clean_p if is_val else new_path,
+                        "source": "manual",
+                        "updated_at": now_iso,
+                        "valid_at_save": is_val,
+                    }
+                save_native_apps_config(save_data)
                 self.send_json(HTTPStatus.OK, {"ok": True, "config": load_native_apps_config()})
             except Exception as error:
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+            return
+
+        if parsed.path == "/api/config/apps/import-windows":
+            try:
+                body = self.read_json()
+                mode = str(body.get("mode", "fill_empty")).strip().lower()
+                cfg, report = import_windows_default_app_mappings(mode=mode, save=True)
+                self.send_json(HTTPStatus.OK, {
+                    "ok": True,
+                    "config": cfg,
+                    "imported": report.get("imported", {}),
+                    "skipped": report.get("skipped_reasons", {}),
+                    "report": report,
+                })
+            except Exception as error:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(error)})
+            return
+
+        if parsed.path == "/api/config/apps/open-windows-settings":
+            try:
+                if os.name == "nt":
+                    opened = _shell_open("ms-settings:defaultapps")
+                    if not opened and hasattr(os, "startfile"):
+                        os.startfile("ms-settings:defaultapps")
+                self.send_json(HTTPStatus.OK, {"ok": True})
+            except Exception as error:
+                self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": str(error)})
             return
 
         if parsed.path == "/api/choose-exe":
@@ -3737,6 +4030,12 @@ def main() -> None:
     PDF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     MANIFESTS_DIR.mkdir(exist_ok=True)
     (RUNTIME_DIR / "logs").mkdir(exist_ok=True)
+
+    # Изолированный шаг первичной инициализации при первом старте backend (startup lifecycle)
+    try:
+        ensure_native_apps_first_run_initialized()
+    except Exception as init_err:
+        print(f"[Startup Warn] Native apps initialization skipped: {init_err}", file=sys.stderr, flush=True)
 
     atexit.register(lambda: kill_dwg_daemon("server-exit"))
 
