@@ -1787,47 +1787,74 @@ def launch_system_default(path: Path) -> str:
 
 
 def launch_native_file(path: Path) -> str:
-    """Запустить файл в ассоциированной программе, либо открыть в проводнике Windows."""
+    """Запустить файл в ассоциированной программе, либо открыть через системную ассоциацию Windows."""
     if not path.exists():
         raise FileNotFoundError(f"Файл или папка не найдены: {path}")
-
     resolved = os.path.normpath(str(path.resolve()))
-
     if path.is_dir():
         return open_in_explorer(path)
 
-    # 1. Проверяем переключатель «Открыть в нативной программе» и пути
     suffix = path.suffix.casefold()
     cfg = load_native_apps_config()
     use_native = bool(cfg.get("useNativeApps", True))
 
-    if use_native and suffix in {".dwg", ".dxf"}:
-        dwg_exe = str(
-            cfg.get(suffix, "")
-            or cfg.get(".dwg", "")
-            or cfg.get(".dxf", "")
-            or cfg.get("settingDwgExe", "")
-        ).strip()
-        if not dwg_exe or not Path(dwg_exe).exists():
-            raise ValueError("Не найден AutoCAD, укажите путь в настройках")
-
+    # 1. Поиск пути в настройках пользователя
+    custom_raw = ""
     if use_native:
-        custom_exe = str(
+        custom_raw = str(
             cfg.get(suffix, "")
-            or (dwg_exe if suffix in {".dwg", ".dxf"} else "")
+            or cfg.get(suffix.lstrip("."), "")
+            or cfg.get(suffix.upper(), "")
+            or (cfg.get("settingDwgExe", "") if suffix in {".dwg", ".dxf"} else "")
+            or (cfg.get("settingPdfExe", "") if suffix in {".pdf"} else "")
+            or (cfg.get("settingWordExe", "") if suffix in {".doc", ".docx", ".rtf", ".odt"} else "")
+            or (cfg.get("settingExcelExe", "") if suffix in {".xls", ".xlsx", ".xlsm", ".csv", ".ods"} else "")
+            or (cfg.get("settingPptExe", "") if suffix in {".ppt", ".pptx", ".odp"} else "")
+            or (cfg.get("settingImgExe", "") if suffix in {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".tif", ".tiff", ".ico", ".svg"} else "")
+            or (cfg.get("settingMediaExe", "") if suffix in {".mp4", ".avi", ".mov", ".mkv", ".wmv", ".mp3", ".wav"} else "")
         ).strip()
-        if custom_exe and Path(custom_exe).exists():
-            try:
-                exe_path = str(Path(custom_exe).resolve())
-                proc = subprocess.Popen([exe_path, resolved], cwd=str(Path(exe_path).parent))
-                bring_native_window_to_front(proc.pid, exe_path)
+
+    clean_exe = _clean_configured_exe_path(custom_raw) if custom_raw else ""
+    if not clean_exe and custom_raw:
+        cand = custom_raw.strip('"').strip("'").strip()
+        if cand and Path(cand).is_file():
+            clean_exe = str(Path(cand).resolve())
+
+    # 2. Если настроен конкретный исполняемый файл — запускаем его
+    if clean_exe and Path(clean_exe).is_file():
+        try:
+            exe_path = str(Path(clean_exe).resolve())
+            exe_dir = str(Path(exe_path).parent)
+            if os.name == "nt":
+                # Запуск через cmd /c start гарантирует, что процесс стартует
+                # в независимом сеансе вне Job Object сервера лаунчера
+                try:
+                    subprocess.Popen(
+                        ["cmd.exe", "/c", "start", "", exe_path, resolved],
+                        cwd=exe_dir,
+                        **hidden_process_kwargs(),
+                    )
+                except Exception:
+                    creationflags = getattr(subprocess, "DETACHED_PROCESS", 0x00000008) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+                    subprocess.Popen(
+                        [exe_path, resolved],
+                        cwd=exe_dir,
+                        creationflags=creationflags,
+                    )
+                bring_native_window_to_front(0, exe_path)
                 _bring_window_to_front(None, None, 120.0, Path(resolved).name, 3)
                 return f"custom-app:{Path(exe_path).name}"
-            except Exception as err:
-                pass
+            else:
+                subprocess.Popen([exe_path, resolved], cwd=exe_dir)
+                return f"custom-app:{Path(exe_path).name}"
+        except Exception:
+            pass
 
-    # 2. Если переключатель выключен, путь не задан или программа не запустилась — открываем проводник
-    return open_in_explorer(path)
+    # 3. Если отдельная программа не настроена или не запустилась — запускаем через системную ассоциацию Windows
+    try:
+        return launch_system_default(path)
+    except Exception:
+        return open_in_explorer(path)
 
 
 NATIVE_OPEN_LOG_LOCK = threading.Lock()
@@ -2637,6 +2664,10 @@ def _clean_configured_exe_path(raw: str) -> str:
     if not raw:
         return ""
     raw = raw.strip()
+    # Strip quotes if entire string is quoted
+    stripped = raw.strip('"').strip("'").strip()
+    if stripped and Path(stripped).is_file():
+        return str(Path(stripped).resolve())
     m = re.match(r'^"([^"]+\.exe)"', raw, re.IGNORECASE)
     if m:
         cand = m.group(1)
@@ -2650,7 +2681,7 @@ def _clean_configured_exe_path(raw: str) -> str:
     try:
         parts = shlex.split(raw, posix=False)
         for part in parts:
-            p = part.strip('"')
+            p = part.strip('"').strip("'")
             if p.lower().endswith(".exe") and Path(p).is_file():
                 return str(Path(p).resolve())
     except Exception:

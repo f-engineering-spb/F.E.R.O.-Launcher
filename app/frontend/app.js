@@ -102,6 +102,7 @@ const els = {
   viewZoomIn: document.getElementById("viewZoomIn"),
   viewFit: document.getElementById("viewFit"),
   viewRotate: document.getElementById("viewRotate"),
+  viewOpenNative: document.getElementById("viewOpenNative"),
   viewPanMode: document.getElementById("viewPanMode"),
   contextMenu: document.getElementById("contextMenu"),
   viewStandardMode: document.getElementById("viewStandardMode"),
@@ -410,11 +411,25 @@ function showNotice(message) {
 
 
 function getNativeAppLabel(ext = "") {
+  const custom = settingsCustomExe(ext);
+  if (custom) {
+    const filename = custom.split(/[\\/]/).pop();
+    const base = filename.replace(/\.exe$/i, "");
+    const baseLower = base.toLowerCase();
+    if (baseLower === "acad") return "AutoCAD";
+    if (baseLower.includes("trueview")) return "DWG TrueView";
+    if (baseLower === "winword") return "Word";
+    if (baseLower === "excel") return "Excel";
+    if (baseLower === "powerpnt") return "PowerPoint";
+    if (baseLower === "acrobat" || baseLower === "acrord32") return "Adobe Acrobat";
+    if (baseLower === "vlc") return "VLC";
+    return base;
+  }
   const e = String(ext).toUpperCase().replace(/^\./, "");
   switch (e) {
     case "DWG":
-    case "DXF": return "AutoCAD";
-    case "PDF": return "ONLYOFFICE / PDF";
+    case "DXF": return "AutoCAD / DWG";
+    case "PDF": return "PDF-просмотрщике";
     case "DOC":
     case "DOCX":
     case "RTF":
@@ -428,9 +443,6 @@ function getNativeAppLabel(ext = "") {
     case "PPT":
     case "PPTX":
     case "ODP": return "PowerPoint";
-    case "GDOC": return "Google Docs";
-    case "GSHEET": return "Google Таблицах";
-    case "GSLIDES": return "Google Презентациях";
     case "JPG":
     case "JPEG":
     case "PNG":
@@ -447,42 +459,8 @@ function getNativeAppLabel(ext = "") {
     case "MKV":
     case "WMV":
     case "MP3":
-    case "WAV": return "Медиаплеере (VLC)";
-    case "ZIP":
-    case "RAR":
-    case "7Z":
-    case "TAR":
-    case "GZ": return "Архиваторе";
-    case "TXT":
-    case "LOG":
-    case "INI":
-    case "CFG":
-    case "JSON":
-    case "XML":
-    case "YAML":
-    case "YML": return "Блокноте";
+    case "WAV": return "Медиаплеере";
     default: return e ? `${e}` : "программе";
-  }
-}
-
-async function openFileByPath(path, action) {
-  if (!path) return;
-  const act = String(action || "explorer");
-  const actLabel = act === "system" ? "программе по умолчанию" : act === "native" ? "нативной программе" : "Проводнике Windows";
-  startProgress("Открытие в " + actLabel, path);
-  try {
-    const response = await fetch("/api/open-file", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path, action: act }),
-    });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || "Не удалось открыть файл");
-    finishProgress("Открыто: " + actLabel);
-    if (payload.longPathWarning) showNotice(payload.longPathWarning);
-  } catch (error) {
-    console.error("[Launcher] Failed to open file:", error);
-    showOperationError(error);
   }
 }
 
@@ -2808,13 +2786,18 @@ function showPdfPage(page, options = {}) {
         <div class="native-file-name">${escapeHtml(page.name)}</div>
         <div class="native-file-message">${escapeHtml(page.message || "")}</div>
         <div class="native-file-path" title="${escapeHtml(sourcePath)}">${escapeHtml(sourcePath)}</div>
+        <button type="button" class="native-card-open-btn" id="nativeCardOpenBtn">Открыть файл в программе</button>
         <div class="native-file-hint">Правая кнопка мыши — открыть / скопировать путь</div>
       </div>
     `;
 
     const nativeCard = els.viewerEmpty.querySelector(".native-file-card");
     if (nativeCard) {
-      nativeCard.addEventListener("contextmenu", (event) => {
+      const openBtn = nativeCard.querySelector("#nativeCardOpenBtn");
+    if (openBtn) {
+      openBtn.addEventListener("click", () => openFileByPath(sourcePath, "native"));
+    }
+    nativeCard.addEventListener("contextmenu", (event) => {
         event.preventDefault();
         event.stopPropagation();
         showFileContextMenu(event.clientX, event.clientY, {
@@ -3735,6 +3718,17 @@ els.viewZoomOut.addEventListener("click", () => zoomPdf(0.82));
 els.viewZoomIn.addEventListener("click", () => zoomPdf(1.22));
 // «Вписать» возвращает всё в нормальное состояние: масштаб картинки,
 // сдвиг и поворот. Панель при этом никуда не уезжает.
+if (els.viewOpenNative) {
+  els.viewOpenNative.addEventListener("click", () => {
+    const info = getActiveSourceInfo();
+    const wb = state.excelWorkbook;
+    const targetPath = (info && info.path) || (wb && wb.path) || state.activeNativePath || "";
+    if (targetPath) {
+      openFileByPath(targetPath, "native");
+    }
+  });
+}
+
 els.viewFit.addEventListener("click", () => {
   if (state.excelWorkbook) {
     state.view.rotation = 0;
@@ -4401,15 +4395,19 @@ async function loadAppSettings() {
 }
 
 function settingsCustomExe(extension) {
-  const ext = String(extension || "").toUpperCase();
-  if (!ext) return "";
-  const direct = String(state.appSettings?.["." + ext] || "").trim();
-  if (direct) return direct;
-  return "";
+  if (!extension) return "";
+  const raw = String(extension).trim().toLowerCase();
+  const withDot = raw.startsWith(".") ? raw : "." + raw;
+  const withoutDot = raw.startsWith(".") ? raw.slice(1) : raw;
+  return String(
+    state.appSettings?.[withDot] ||
+    state.appSettings?.[withoutDot] ||
+    state.appSettings?.[withDot.toUpperCase()] ||
+    state.appSettings?.[withoutDot.toUpperCase()] ||
+    ""
+  ).trim();
 }
 
-// Группы типов файлов для строк путей в Параметрах: подпись, расширения,
-// id поля ввода и пример пути. Один путь действует на все расширения группы.
 const NATIVE_APP_GROUPS = [
   { id: "settingDwgExe", label: "AutoCAD / DWG (.dwg, .dxf)", exts: [".dwg", ".dxf"], ph: "Например: C:\\Program Files\\Autodesk\\AutoCAD 2024\\acad.exe" },
   { id: "settingPdfExe", label: "PDF-просмотрщик (.pdf)", exts: [".pdf"], ph: "Например: C:\\Program Files\\Adobe\\Acrobat DC\\Acrobat\\Acrobat.exe" },
@@ -4476,9 +4474,13 @@ function showFileContextMenu(clientX, clientY, target) {
     { label: "Открыть в проводнике", run: () => openFileByPath(target.path, "explorer") },
   ];
   if (!target.isDir) {
-    items.push({ label: "Открыть в программе", run: () => openFileByPath(target.path, "system") });
-    if (settingsCustomExe(target.ext)) {
-      items.push({ label: `Открыть в ${getNativeAppLabel(target.ext)}`, run: () => openFileByPath(target.path, "native") });
+    const custom = settingsCustomExe(target.ext);
+    const label = getNativeAppLabel(target.ext);
+    if (custom) {
+      items.push({ label: `Открыть в ${label}`, run: () => openFileByPath(target.path, "native") });
+      items.push({ label: "Открыть в программе по умолчанию", run: () => openFileByPath(target.path, "system") });
+    } else {
+      items.push({ label: "Открыть в программе", run: () => openFileByPath(target.path, "system") });
     }
   }
   items.push({ sep: true });
@@ -4595,10 +4597,19 @@ async function saveSettings() {
     useNativeApps: state.appSettings?.useNativeApps !== false,
   };
   document.querySelectorAll("#settingsAppsForm .settings-input").forEach((input) => {
-    const value = (input.value || "").trim();
+    const value = (input.value || "").trim().replace(/^["']+|["']+$/g, "").trim();
     String(input.dataset.exts || "").split(",").map((e) => e.trim()).filter(Boolean).forEach((ext) => {
-      cfg[ext] = value;
+      const lower = ext.toLowerCase();
+      const dot = lower.startsWith(".") ? lower : "." + lower;
+      const noDot = dot.slice(1);
+      cfg[dot] = value;
+      cfg[noDot] = value;
+      cfg[dot.toUpperCase()] = value;
+      cfg[noDot.toUpperCase()] = value;
     });
+    if (input.id) {
+      cfg[input.id] = value;
+    }
   });
   try {
     const res = await fetch("/api/config/apps", {
@@ -4611,7 +4622,7 @@ async function saveSettings() {
       throw new Error(data.error || "Не удалось сохранить настройки");
     }
     closeSettingsModal();
-    loadAppSettings().catch(() => {});
+    await loadAppSettings().catch(() => {});
     showToast("Параметры успешно сохранены");
   } catch (err) {
     showOperationError(err);

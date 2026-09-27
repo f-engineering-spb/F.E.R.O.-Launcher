@@ -1811,3 +1811,38 @@ textarea:focus {
   margin: 4px 6px;
   background: #d4d7dc;
 }
+
+/* Кнопка "Открыть" в панели просмотрщика и на карточке нативного файла */
+.viewer-open-btn {
+  background: #2563eb !important;
+  color: #ffffff !important;
+  font-weight: 600 !important;
+  padding: 4px 10px !important;
+  border-radius: 4px !important;
+  font-size: 12px !important;
+  border: 1px solid #1d4ed8 !important;
+  cursor: pointer !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 4px !important;
+}
+.viewer-open-btn:hover {
+  background: #1d4ed8 !important;
+}
+
+.native-card-open-btn {
+  background: #2563eb;
+  color: #ffffff;
+  font-weight: 600;
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  border: none;
+  cursor: pointer;
+  margin: 12px 0 6px 0;
+  display: inline-block;
+  transition: background 0.15s ease;
+}
+.native-card-open-btn:hover {
+  background: #1d4ed8;
+}
