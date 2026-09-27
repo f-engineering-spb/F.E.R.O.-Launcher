@@ -4580,23 +4580,34 @@ async function saveSettings() {
 async function browseExeForSetting(inputId) {
   const input = document.getElementById(inputId);
   if (!input) return;
+  const currentBtn = document.querySelector(`.settings-browse-btn[data-target="${inputId}"]`);
+  const prevText = currentBtn ? currentBtn.textContent : "Обзор…";
+  if (currentBtn) {
+    currentBtn.disabled = true;
+    currentBtn.textContent = "Выбор…";
+  }
+  showToast("Открывается диалог выбора файла Windows...");
   try {
-    startProgress("Выбор программы", "Открывается диалог Windows...");
     const res = await fetch("/api/choose-exe");
+    if (!res.ok) {
+      throw new Error(`Сервер вернул ошибку HTTP ${res.status}`);
+    }
     const data = await res.json();
-    finishProgress("");
     if (data.path) {
       input.value = data.path;
       showToast("Выбран файл: " + data.path);
     } else if (data.error) {
-      showOperationError(new Error(data.error));
+      showToast(data.error);
     }
   } catch (err) {
-    finishProgress("");
-    showOperationError(err);
+    showToast(`Не удалось открыть диалог: ${err.message || err}`);
+  } finally {
+    if (currentBtn) {
+      currentBtn.disabled = false;
+      currentBtn.textContent = prevText;
+    }
   }
 }
-
 if (els.btnSettings) els.btnSettings.addEventListener("click", openSettingsModal);
 if (els.settingsCloseBtn) els.settingsCloseBtn.addEventListener("click", closeSettingsModal);
 if (els.settingsCancelBtn) els.settingsCancelBtn.addEventListener("click", closeSettingsModal);

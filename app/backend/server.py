@@ -3097,30 +3097,49 @@ class LauncherHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/choose-exe":
+            # Выбор исполняемого файла (.exe) через системный диалог OpenFileDialog Windows
             try:
-                choose_script = REPO_ROOT / "scripts" / "choose_exe.py"
-                choose_env = dict(os.environ)
-                choose_env["PYTHONUTF8"] = "1"
-                choose_env["PYTHONIOENCODING"] = "utf-8"
-                proc = subprocess.run(
-                    [sys.executable, str(choose_script)],
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="strict",
-                    timeout=120,
-                    env=choose_env,
+                ps_command = (
+                    "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+                    "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+                    "Add-Type -AssemblyName System.Windows.Forms; "
+                    "$dlg = New-Object System.Windows.Forms.OpenFileDialog; "
+                    '$dlg.Filter = "Исполняемые файлы (*.exe)|*.exe|Все файлы (*.*)|*.*"; '
+                    '$dlg.Title = "Выберите программу для запуска (.exe)"; '
+                    "$dlg.RestoreDirectory = $true; "
+                    "$owner = New-Object System.Windows.Forms.Form; "
+                    "$owner.TopMost = $true; $owner.ShowInTaskbar = $false; "
+                    "$null = $owner.Handle; "
+                    "try { if ($dlg.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) "
+                    "{ [Console]::WriteLine($dlg.FileName) } } "
+                    "finally { $owner.Dispose(); $dlg.Dispose() }"
                 )
-                raw = proc.stdout.strip()
-                selected = ""
-                if raw:
-                    try:
-                        parsed_json = json.loads(raw)
-                        if isinstance(parsed_json, str):
-                            selected = parsed_json
-                    except Exception:
-                        selected = raw.strip('"')
-                self.send_json(HTTPStatus.OK, {"path": selected})
+                _bring_window_to_front(None, "#32770", 115.0, "Выберите программу")
+                creation_flags = 0
+                if os.name == "nt":
+                    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                proc = subprocess.run(
+                    [
+                        "powershell.exe",
+                        "-WindowStyle",
+                        "Hidden",
+                        "-STA",
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-Command",
+                        ps_command,
+                    ],
+                    capture_output=True,
+                    text=False,
+                    timeout=120,
+                    creationflags=creation_flags,
+                )
+                selected = decode_folder_dialog_output(proc.stdout)
+                if selected and Path(selected).is_file():
+                    self.send_json(HTTPStatus.OK, {"path": selected})
+                else:
+                    self.send_json(HTTPStatus.OK, {"path": ""})
             except subprocess.TimeoutExpired:
                 self.send_json(
                     HTTPStatus.OK,
