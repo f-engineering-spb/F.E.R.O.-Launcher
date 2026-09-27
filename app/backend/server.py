@@ -8,8 +8,6 @@ import io
 import json
 import mimetypes
 import os
-import re
-import shlex
 import shutil
 import struct
 import subprocess
@@ -1263,7 +1261,6 @@ def render_dwg_model(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
         return document
 
     # 2. Level 1: Моментальное извлечение встроенного растра из заголовка DWG (< 1 мс)
-    # Показывается внутри лаунчера ТОЛЬКО как картинка (без запуска AutoCAD/TrueView)
     cached_png = target_dir / "page-1.png"
     if not (cached_png.exists() and cached_png.stat().st_size > 0):
         raster_bytes = extract_dwg_embedded_raster(path)
@@ -1271,11 +1268,8 @@ def render_dwg_model(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
             cached_png.write_bytes(raster_bytes)
 
     if cached_png.exists() and cached_png.stat().st_size > 0:
-        # ВНИМАНИЕ: Не запускаем фоновый рендеринг AutoCAD / TrueView самовольно!
-        # Запуск CAD разрешён только если AutoCAD явно настроен в «Параметрах».
-        cad_configured = get_configured_exe_for_path(path)
-        if cad_configured and Path(cad_configured).is_file():
-            trigger_bg_dwg_render(path, dpi)
+        # Запускаем фоновый рендеринг через AutoCAD COM в отдельном потоке (non-blocking)
+        trigger_bg_dwg_render(path, dpi)
         return {
             "name": path.name,
             "path": str(path),
@@ -1304,45 +1298,7 @@ def render_dwg_model(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
             "previewMode": "cad-smart-layouts",
         }
 
-    # 3. Fallback: если встроенного превью не обнаружено:
-    # Запуск векторного рендера разрешён ТОЛЬКО если путь к CAD указан в «Параметрах»
-    cad_configured = get_configured_exe_for_path(path)
-    if not cad_configured or not Path(cad_configured).is_file():
-        # Отдаем заглушку без вызова TrueView/AutoCAD
-        try:
-            from app.backend.dwg_engine import _generate_placeholder_png
-        except ImportError:
-            from dwg_engine import _generate_placeholder_png
-        placeholder_bytes = _generate_placeholder_png(path.name, "DWG Preview (укажите CAD в Параметрах)")
-        cached_png.write_bytes(placeholder_bytes)
-        return {
-            "name": path.name,
-            "path": str(path),
-            "sourcePath": str(path),
-            "sourceName": path.name,
-            "sourceType": "DWG",
-            "dpi": dpi,
-            "pages": 1,
-            "renderedPages": 1,
-            "cacheKey": key,
-            "cacheHit": True,
-            "cacheHitPages": 1,
-            "newRenderedPages": 0,
-            "errors": [],
-            "items": [
-                {
-                    "page": 1,
-                    "name": f"{path.name} · заглушка",
-                    "url": f"/cache/dwg/{key}/page-1.png",
-                    "bytes": cached_png.stat().st_size,
-                }
-            ],
-            "status": "ok",
-            "convertedPdfPath": "",
-            "convertCacheHit": False,
-            "previewMode": "cad-smart-layouts",
-        }
-
+    # 3. Fallback: если встроенного превью не обнаружено, синхронный рендеринг
     pdf_path, convert_cache_hit = dwg_to_model_pdf(path)
     document = render_pdf(pdf_path, dpi=dpi, page_timeout_seconds=DWG_MODEL_PAGE_TIMEOUT_SECONDS)
     document["name"] = path.name
@@ -1478,320 +1434,6 @@ DEFAULT_NATIVE_APPS: dict[str, Any] = {
     ".mp3": "",
     ".wav": "",
 }
-
-try:
-    import winreg
-except ImportError:
-    winreg = None
-
-
-def _clean_configured_exe_path(raw: str) -> str:
-    if not raw:
-        return ""
-    raw = raw.strip()
-    m = re.match(r'^"([^"]+\\.exe)"', raw, re.IGNORECASE)
-    if m:
-        cand = m.group(1)
-        if Path(cand).is_file():
-            return str(Path(cand).resolve())
-    m2 = re.match(r'^([a-zA-Z]:\\\S+\\.exe)', raw, re.IGNORECASE)
-    if m2:
-        cand = m2.group(1)
-        if Path(cand).is_file():
-            return str(Path(cand).resolve())
-    try:
-        parts = shlex.split(raw, posix=False)
-        for part in parts:
-            p = part.strip('"')
-            if p.lower().endswith(".exe") and Path(p).is_file():
-                return str(Path(p).resolve())
-    except Exception:
-        pass
-    return ""
-
-
-def _detect_via_assoc_query_win32(ext: str) -> str:
-    """Вызов нативного Windows API AssocQueryStringW (точный системный механизм Explorer)."""
-    try:
-        import ctypes
-        from ctypes import wintypes
-        shlwapi = getattr(ctypes.windll, "shlwapi", None)
-        if not shlwapi:
-            return ""
-        AssocQueryStringW = getattr(shlwapi, "AssocQueryStringW", None)
-        if not AssocQueryStringW:
-            return ""
-        AssocQueryStringW.argtypes = [
-            wintypes.DWORD,
-            wintypes.DWORD,
-            wintypes.LPCWSTR,
-            wintypes.LPCWSTR,
-            wintypes.LPWSTR,
-            ctypes.POINTER(wintypes.DWORD),
-        ]
-        AssocQueryStringW.restype = wintypes.DWORD
-
-        ASSOCSTR_EXECUTABLE = 2
-        ASSOCSTR_COMMAND = 1
-        ASSOCF_NOTRUNCATE = 0x00000020
-
-        for str_type in (ASSOCSTR_EXECUTABLE, ASSOCSTR_COMMAND):
-            cch = wintypes.DWORD(2048)
-            buf = ctypes.create_unicode_buffer(2048)
-            hr = AssocQueryStringW(
-                ASSOCF_NOTRUNCATE,
-                str_type,
-                ext,
-                "open",
-                buf,
-                ctypes.byref(cch),
-            )
-            if hr == 0 and buf.value:
-                cand = buf.value.strip()
-                if cand.lower().endswith(".exe") and Path(cand).is_file():
-                    return str(Path(cand).resolve())
-                cleaned = _clean_configured_exe_path(cand)
-                if cleaned:
-                    return cleaned
-    except Exception:
-        pass
-    return ""
-
-
-def _get_command_from_progid(progid: str) -> str:
-    if not winreg or not progid:
-        return ""
-    keys_to_try = [
-        f"{progid}\\\\shell\\\\open\\\\command",
-        f"{progid}\\\\shell\\\\Open\\\\command",
-        f"{progid}\\\\shell\\\\edit\\\\command",
-    ]
-    for subkey in keys_to_try:
-        try:
-            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, subkey) as k:
-                val, _ = winreg.QueryValueEx(k, "")
-                cleaned = _clean_configured_exe_path(val)
-                if cleaned:
-                    return cleaned
-        except OSError:
-            pass
-    return ""
-
-
-def detect_windows_app_for_ext(ext: str) -> str:
-    """Определяет установленную в Windows программу по умолчанию для расширения."""
-    ext = ext.lower().strip()
-    if not ext.startswith("."):
-        ext = "." + ext
-
-    # 1. Точный системный вызов Windows API AssocQueryStringW
-    res = _detect_via_assoc_query_win32(ext)
-    if res:
-        return res
-
-    # 2. Опрос реестра Windows (UserChoice - Windows 10/11)
-    if winreg:
-        user_choice = f"Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Explorer\\\\FileExts\\\\{ext}\\\\UserChoice"
-        try:
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, user_choice) as k:
-                progid, _ = winreg.QueryValueEx(k, "ProgId")
-                res = _get_command_from_progid(progid)
-                if res:
-                    return res
-        except OSError:
-            pass
-
-        # 3. HKEY_CLASSES_ROOT default ProgID
-        try:
-            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, ext) as k:
-                progid = winreg.QueryValue(k, "")
-                res = _get_command_from_progid(progid)
-                if res:
-                    return res
-        except OSError:
-            pass
-
-        # 4. OpenWithProgids
-        openwith = f"Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Explorer\\\\FileExts\\\\{ext}\\\\OpenWithProgids"
-        try:
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, openwith) as k:
-                i = 0
-                while True:
-                    try:
-                        name, _, _ = winreg.EnumValue(k, i)
-                        res = _get_command_from_progid(name)
-                        if res:
-                            return res
-                        i += 1
-                    except OSError:
-                        break
-        except OSError:
-            pass
-
-        # 5. OpenWithList -> Applications
-        try:
-            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, f"{ext}\\\\OpenWithList") as k:
-                i = 0
-                while True:
-                    try:
-                        subk_name = winreg.EnumKey(k, i)
-                        app_key = f"Applications\\\\{subk_name}\\\\shell\\\\open\\\\command"
-                        try:
-                            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, app_key) as ak:
-                                val, _ = winreg.QueryValueEx(ak, "")
-                                cleaned = _clean_configured_exe_path(val)
-                                if cleaned:
-                                    return cleaned
-                        except OSError:
-                            pass
-                        i += 1
-                    except OSError:
-                        break
-        except OSError:
-            pass
-
-    return ""
-
-
-# Стандартные пути к популярным САПР, Офису и просмотрщикам на случай «голых» ассоциаций
-FALLBACK_APP_CANDIDATES: dict[str, list[str]] = {
-    ".dwg": [
-        r"C:\\Program Files\\Autodesk\\AutoCAD 2026\\acad.exe",
-        r"C:\\Program Files\\Autodesk\\AutoCAD 2025\\acad.exe",
-        r"C:\\Program Files\\Autodesk\\AutoCAD 2024\\acad.exe",
-        r"C:\\Program Files\\Autodesk\\AutoCAD 2023\\acad.exe",
-        r"C:\\Program Files\\Autodesk\\AutoCAD 2022\\acad.exe",
-        r"C:\\Program Files\\Autodesk\\AutoCAD 2021\\acad.exe",
-        r"C:\\Program Files\\Autodesk\\DWG TrueView 2026 - English\\dwgviewr.exe",
-        r"C:\\Program Files\\Autodesk\\DWG TrueView 2025 - English\\dwgviewr.exe",
-        r"C:\\Program Files\\Autodesk\\DWG TrueView 2024 - English\\dwgviewr.exe",
-        r"C:\\Program Files\\Nanosoft\\nanoCAD x64 24.0\\nacad.exe",
-        r"C:\\Program Files\\Nanosoft\\nanoCAD x64 23.0\\nacad.exe",
-        r"C:\\Program Files\\Nanosoft\\nanoCAD x64 22.0\\nacad.exe",
-        r"C:\\Program Files\\Nanosoft\\nanoCAD x64 21.0\\nacad.exe",
-        r"C:\\Program Files (x86)\\Nanosoft\\nanoCAD 5.1\\nacad.exe",
-    ],
-    ".dxf": [
-        r"C:\\Program Files\\Autodesk\\AutoCAD 2026\\acad.exe",
-        r"C:\\Program Files\\Autodesk\\AutoCAD 2025\\acad.exe",
-        r"C:\\Program Files\\Autodesk\\AutoCAD 2024\\acad.exe",
-        r"C:\\Program Files\\Autodesk\\DWG TrueView 2025 - English\\dwgviewr.exe",
-        r"C:\\Program Files\\Nanosoft\\nanoCAD x64 24.0\\nacad.exe",
-    ],
-    ".pdf": [
-        r"C:\\Program Files\\Adobe\\Acrobat DC\\Acrobat\\Acrobat.exe",
-        r"C:\\Program Files (x86)\\Adobe\\Acrobat Reader DC\\Reader\\AcroRd32.exe",
-        r"C:\\Program Files\\Adobe\\Acrobat Reader DC\\Reader\\AcroRd64.exe",
-        r"C:\\Program Files\\Foxit Software\\Foxit PDF Reader\\FoxitPDFReader.exe",
-        r"C:\\Program Files (x86)\\Foxit Software\\Foxit Reader\\FoxitReader.exe",
-        r"C:\\Program Files\\Tracker Software\\PDF Editor\\PDFXEdit.exe",
-        r"C:\\Program Files (x86)\\Tracker Software\\PDF Editor\\PDFXEdit.exe",
-        r"C:\\Program Files\\SumatraPDF\\SumatraPDF.exe",
-        r"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
-        r"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-    ],
-    ".docx": [
-        r"C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE",
-        r"C:\\Program Files (x86)\\Microsoft Office\\root\\Office16\\WINWORD.EXE",
-        r"C:\\Program Files\\Microsoft Office\\Office16\\WINWORD.EXE",
-        r"C:\\Program Files (x86)\\Microsoft Office\\Office16\\WINWORD.EXE",
-        r"C:\\Program Files\\Microsoft Office\\Office15\\WINWORD.EXE",
-        r"C:\\Program Files\\WPS Office\\ksolaunch.exe",
-        r"C:\\Program Files\\LibreOffice\\program\\soffice.exe",
-        r"C:\\Program Files\\Windows NT\\Accessories\\wordpad.exe",
-    ],
-    ".xlsx": [
-        r"C:\\Program Files\\Microsoft Office\\root\\Office16\\EXCEL.EXE",
-        r"C:\\Program Files (x86)\\Microsoft Office\\root\\Office16\\EXCEL.EXE",
-        r"C:\\Program Files\\Microsoft Office\\Office16\\EXCEL.EXE",
-        r"C:\\Program Files (x86)\\Microsoft Office\\Office16\\EXCEL.EXE",
-        r"C:\\Program Files\\Microsoft Office\\Office15\\EXCEL.EXE",
-        r"C:\\Program Files\\WPS Office\\ksolaunch.exe",
-        r"C:\\Program Files\\LibreOffice\\program\\soffice.exe",
-    ],
-    ".pptx": [
-        r"C:\\Program Files\\Microsoft Office\\root\\Office16\\POWERPNT.EXE",
-        r"C:\\Program Files (x86)\\Microsoft Office\\root\\Office16\\POWERPNT.EXE",
-        r"C:\\Program Files\\Microsoft Office\\Office16\\POWERPNT.EXE",
-        r"C:\\Program Files (x86)\\Microsoft Office\\Office16\\POWERPNT.EXE",
-        r"C:\\Program Files\\WPS Office\\ksolaunch.exe",
-        r"C:\\Program Files\\LibreOffice\\program\\soffice.exe",
-    ],
-    ".png": [
-        r"C:\\Windows\\System32\\mspaint.exe",
-        r"C:\\Windows\\mspaint.exe",
-    ],
-    ".zip": [
-        r"C:\\Program Files\\7-Zip\\7zFM.exe",
-        r"C:\\Program Files (x86)\\7-Zip\\7zFM.exe",
-        r"C:\\Program Files\\WinRAR\\WinRAR.exe",
-        r"C:\\Program Files (x86)\\WinRAR\\WinRAR.exe",
-    ],
-    ".txt": [
-        r"C:\\Windows\\System32\\notepad.exe",
-        r"C:\\Windows\\notepad.exe",
-        r"C:\\Program Files\\Notepad++\\notepad++.exe",
-        r"C:\\Program Files (x86)\\Notepad++\\notepad++.exe",
-    ],
-    ".mp4": [
-        r"C:\\Program Files\\VideoLAN\\VLC\\vlc.exe",
-        r"C:\\Program Files (x86)\\VideoLAN\\VLC\\vlc.exe",
-        r"C:\\Program Files\\K-Lite Codec Pack\\MPC-HC64\\mpc-hc64.exe",
-        r"C:\\Program Files (x86)\\K-Lite Codec Pack\\MPC-HC\\mpc-hc.exe",
-        r"C:\\Program Files\\Windows Media Player\\wmplayer.exe",
-        r"C:\\Program Files (x86)\\Windows Media Player\\wmplayer.exe",
-    ]
-}
-
-
-def detect_all_windows_default_apps() -> dict[str, str]:
-    """Сканирует систему Windows для всех известных расширений лаунчера."""
-    results = {}
-    for ext in DEFAULT_NATIVE_APPS:
-        if ext.startswith("."):
-            found = detect_windows_app_for_ext(ext)
-            if not found:
-                # Проверяем типовые пути установки
-                candidates = FALLBACK_APP_CANDIDATES.get(ext, [])
-                for cand in candidates:
-                    if Path(cand).is_file():
-                        found = str(Path(cand).resolve())
-                        break
-            if found:
-                results[ext] = found
-
-    # Распространяем найденное на связанные форматы группы
-    if results.get(".docx") and not results.get(".doc"):
-        results[".doc"] = results[".docx"]
-        results[".rtf"] = results[".docx"]
-    if results.get(".doc") and not results.get(".docx"):
-        results[".docx"] = results[".doc"]
-    if results.get(".xlsx") and not results.get(".xls"):
-        results[".xls"] = results[".xlsx"]
-        results[".csv"] = results[".xlsx"]
-    if results.get(".pptx") and not results.get(".ppt"):
-        results[".ppt"] = results[".pptx"]
-    if results.get(".dwg") and not results.get(".dxf"):
-        results[".dxf"] = results[".dwg"]
-    if results.get(".png"):
-        for img_ext in (".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".ico", ".svg"):
-            if not results.get(img_ext):
-                results[img_ext] = results[".png"]
-    if results.get(".zip"):
-        for arch_ext in (".rar", ".7z", ".tar", ".gz"):
-            if not results.get(arch_ext):
-                results[arch_ext] = results[".zip"]
-    if results.get(".txt"):
-        for txt_ext in (".log", ".ini", ".cfg", ".json", ".xml", ".yaml", ".yml"):
-            if not results.get(txt_ext):
-                results[txt_ext] = results[".txt"]
-    if results.get(".mp4"):
-        for media_ext in (".avi", ".mov", ".mkv", ".mp3", ".wav"):
-            if not results.get(media_ext):
-                results[media_ext] = results[".mp4"]
-
-    return results
-
 
 def load_native_apps_config() -> dict[str, Any]:
     if NATIVE_APPS_CONFIG_FILE.exists():
@@ -2280,43 +1922,8 @@ def launch_system_default(path: Path) -> str:
             raise RuntimeError(f"Не удалось открыть программой по умолчанию: {err2}")
 
 
-def get_configured_exe_for_path(path: Path) -> str:
-    """Возвращает настроенный путь к EXE для типа файла из native_apps.json.
-    Если путь не задан или файл не существует — возвращает пустую строку."""
-    if path.is_dir():
-        return ""
-    suffix = path.suffix.casefold()
-    cfg = load_native_apps_config()
-    
-    candidate = str(cfg.get(suffix, "")).strip()
-    if not candidate:
-        if suffix in {".dwg", ".dxf"}:
-            candidate = str(cfg.get("settingDwgExe", "") or cfg.get(".dwg", "") or cfg.get(".dxf", "")).strip()
-        elif suffix in {".pdf"}:
-            candidate = str(cfg.get("settingPdfExe", "") or cfg.get(".pdf", "")).strip()
-        elif suffix in {".doc", ".docx", ".rtf", ".odt"}:
-            candidate = str(cfg.get("settingWordExe", "") or cfg.get(".docx", "") or cfg.get(".doc", "")).strip()
-        elif suffix in {".xls", ".xlsx", ".xlsm", ".csv", ".ods"}:
-            candidate = str(cfg.get("settingExcelExe", "") or cfg.get(".xlsx", "") or cfg.get(".xls", "")).strip()
-        elif suffix in {".ppt", ".pptx", ".odp"}:
-            candidate = str(cfg.get("settingPptExe", "")).strip()
-        elif suffix in {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".tif", ".tiff", ".ico", ".svg"}:
-            candidate = str(cfg.get("settingImgExe", "")).strip()
-        elif suffix in {".zip", ".rar", ".7z", ".tar", ".gz"}:
-            candidate = str(cfg.get("settingArchExe", "")).strip()
-        elif suffix in {".txt", ".log", ".ini", ".cfg", ".json", ".xml", ".yaml", ".yml"}:
-            candidate = str(cfg.get("settingTxtExe", "")).strip()
-        elif suffix in {".mp4", ".avi", ".mov", ".mkv", ".mp3", ".wav"}:
-            candidate = str(cfg.get("settingMediaExe", "")).strip()
-            
-    if candidate and Path(candidate).is_file():
-        return str(Path(candidate).resolve())
-    return ""
-
-
 def launch_native_file(path: Path) -> str:
-    """Запустить файл строго в настроенной программе из «Параметров».
-    Если путь не задан или файл программы не найден — возбуждает ValueError."""
+    """Запустить файл в ассоциированной программе, либо открыть в проводнике Windows."""
     if not path.exists():
         raise FileNotFoundError(f"Файл или папка не найдены: {path}")
 
@@ -2325,20 +1932,38 @@ def launch_native_file(path: Path) -> str:
     if path.is_dir():
         return open_in_explorer(path)
 
+    # 1. Проверяем переключатель «Открыть в нативной программе» и пути
     suffix = path.suffix.casefold()
-    custom_exe = get_configured_exe_for_path(path)
-    if not custom_exe or not Path(custom_exe).is_file():
-        ext_label = suffix.upper() if suffix else 'файлов данного типа'
-        raise ValueError(f"APP_NOT_CONFIGURED: Путь к программе для {ext_label} не указан или неверен в меню «Параметры».")
+    cfg = load_native_apps_config()
+    use_native = bool(cfg.get("useNativeApps", True))
 
-    try:
-        exe_path = str(Path(custom_exe).resolve())
-        proc = subprocess.Popen([exe_path, resolved], cwd=str(Path(exe_path).parent))
-        bring_native_window_to_front(proc.pid, exe_path)
-        _bring_window_to_front(None, None, 120.0, Path(resolved).name, 3)
-        return f"custom-app:{Path(exe_path).name}"
-    except Exception as err:
-        raise RuntimeError(f"Не удалось запустить {Path(custom_exe).name}: {err}")
+    if use_native and suffix in {".dwg", ".dxf"}:
+        dwg_exe = str(
+            cfg.get(suffix, "")
+            or cfg.get(".dwg", "")
+            or cfg.get(".dxf", "")
+            or cfg.get("settingDwgExe", "")
+        ).strip()
+        if not dwg_exe or not Path(dwg_exe).exists():
+            raise ValueError("Не найден AutoCAD, укажите путь в настройках")
+
+    if use_native:
+        custom_exe = str(
+            cfg.get(suffix, "")
+            or (dwg_exe if suffix in {".dwg", ".dxf"} else "")
+        ).strip()
+        if custom_exe and Path(custom_exe).exists():
+            try:
+                exe_path = str(Path(custom_exe).resolve())
+                proc = subprocess.Popen([exe_path, resolved], cwd=str(Path(exe_path).parent))
+                bring_native_window_to_front(proc.pid, exe_path)
+                _bring_window_to_front(None, None, 120.0, Path(resolved).name, 3)
+                return f"custom-app:{Path(exe_path).name}"
+            except Exception as err:
+                pass
+
+    # 2. Если переключатель выключен, путь не задан или программа не запустилась — открываем проводник
+    return open_in_explorer(path)
 
 
 NATIVE_OPEN_LOG_LOCK = threading.Lock()
@@ -3134,59 +2759,6 @@ def render_pdf_page(path: Path, page: int, dpi: int = DEFAULT_PDF_DPI, page_time
     }
 
 
-def handle_choose_exe_request(handler: http.server.BaseHTTPRequestHandler) -> None:
-    """Выбор исполняемого файла (.exe) через системный диалог OpenFileDialog Windows."""
-    try:
-        ps_command = (
-            "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
-            "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
-            "Add-Type -AssemblyName System.Windows.Forms; "
-            "$dlg = New-Object System.Windows.Forms.OpenFileDialog; "
-            '$dlg.Filter = "Исполняемые файлы (*.exe)|*.exe|Все файлы (*.*)|*.*"; '
-            '$dlg.Title = "Выберите программу для запуска (.exe)"; '
-            "$dlg.RestoreDirectory = $true; "
-            "$owner = New-Object System.Windows.Forms.Form; "
-            "$owner.TopMost = $true; $owner.ShowInTaskbar = $false; "
-            "$null = $owner.Handle; "
-            "try { if ($dlg.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) "
-            "{ [Console]::WriteLine($dlg.FileName) } } "
-            "finally { $owner.Dispose(); $dlg.Dispose() }"
-        )
-        _bring_window_to_front(None, "#32770", 115.0, "Выберите программу")
-        creation_flags = 0
-        if os.name == "nt":
-            creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-        proc = subprocess.run(
-            [
-                "powershell.exe",
-                "-WindowStyle",
-                "Hidden",
-                "-STA",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-Command",
-                ps_command,
-            ],
-            capture_output=True,
-            text=False,
-            timeout=120,
-            creationflags=creation_flags,
-        )
-        selected = decode_folder_dialog_output(proc.stdout)
-        if selected and Path(selected).is_file():
-            handler.send_json(HTTPStatus.OK, {"path": selected})
-        else:
-            handler.send_json(HTTPStatus.OK, {"path": ""})
-    except subprocess.TimeoutExpired:
-        handler.send_json(
-            HTTPStatus.OK,
-            {"path": "", "timedOut": True, "error": "Диалог выбора программы не ответил за 120 секунд."},
-        )
-    except Exception as error:
-        handler.send_json(HTTPStatus.OK, {"path": "", "error": f"Ошибка вызова диалога: {error}"})
-
-
 class LauncherHandler(BaseHTTPRequestHandler):
     server_version = "FEngineeringLauncherV3/0.1"
 
@@ -3246,17 +2818,8 @@ class LauncherHandler(BaseHTTPRequestHandler):
             self.send_json(HTTPStatus.OK, res)
             return
 
-        if parsed.path in ("/api/config/apps/autodetect", "/api/config/apps/detect"):
-            detected = detect_all_windows_default_apps()
-            self.send_json(HTTPStatus.OK, {"ok": True, "detected": detected})
-            return
-
         if parsed.path == "/api/config/apps":
             self.send_json(HTTPStatus.OK, load_native_apps_config())
-            return
-
-        if parsed.path == "/api/choose-exe":
-            handle_choose_exe_request(self)
             return
 
         if parsed.path == "/api/file/raw":
@@ -3463,11 +3026,6 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.OK, {"path": "", "error": f"Системный диалог выбора папки недоступен: {error}"})
             return
 
-        if parsed.path in ("/api/config/apps/autodetect", "/api/config/apps/detect"):
-            detected = detect_all_windows_default_apps()
-            self.send_json(HTTPStatus.OK, {"ok": True, "detected": detected})
-            return
-
         if parsed.path == "/api/config/apps":
             try:
                 body = self.read_json()
@@ -3480,7 +3038,37 @@ class LauncherHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/choose-exe":
-            handle_choose_exe_request(self)
+            try:
+                choose_script = REPO_ROOT / "scripts" / "choose_exe.py"
+                choose_env = dict(os.environ)
+                choose_env["PYTHONUTF8"] = "1"
+                choose_env["PYTHONIOENCODING"] = "utf-8"
+                proc = subprocess.run(
+                    [sys.executable, str(choose_script)],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="strict",
+                    timeout=120,
+                    env=choose_env,
+                )
+                raw = proc.stdout.strip()
+                selected = ""
+                if raw:
+                    try:
+                        parsed_json = json.loads(raw)
+                        if isinstance(parsed_json, str):
+                            selected = parsed_json
+                    except Exception:
+                        selected = raw.strip('"')
+                self.send_json(HTTPStatus.OK, {"path": selected})
+            except subprocess.TimeoutExpired:
+                self.send_json(
+                    HTTPStatus.OK,
+                    {"path": "", "timedOut": True, "error": "Диалог выбора программы не ответил за 120 секунд."},
+                )
+            except Exception as error:
+                self.send_json(HTTPStatus.OK, {"path": "", "error": f"Ошибка вызова диалога: {error}"})
             return
 
         if parsed.path == "/api/pdf/render":
@@ -3756,9 +3344,9 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 action = str(body.get("action", "") or "default").strip().lower()
                 if action == "explorer":
                     mode = open_in_explorer(target)
+                elif action == "system":
+                    mode = launch_system_default(target)
                 else:
-                    # Для любых попыток открыть файл в программе ('system' или 'native')
-                    # строго проверяем настроенный путь в меню «Параметры»
                     mode = launch_native_file(target)
                 append_native_open_log(
                     {

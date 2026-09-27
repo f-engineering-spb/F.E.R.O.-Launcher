@@ -116,7 +116,6 @@ const els = {
   settingsCloseBtn: document.getElementById("settingsCloseBtn"),
   settingsCancelBtn: document.getElementById("settingsCancelBtn"),
   settingsSaveBtn: document.getElementById("settingsSaveBtn"),
-  settingsAutoDetectBtn: document.getElementById("settingsAutoDetectBtn"),
 
 };
 
@@ -482,15 +481,7 @@ async function openFileByPath(path, action) {
     if (payload.longPathWarning) showNotice(payload.longPathWarning);
   } catch (error) {
     console.error("[Launcher] Failed to open file:", error);
-    const msg = error && error.message ? error.message : String(error);
-    if (msg.includes("APP_NOT_CONFIGURED")) {
-      showNotice("⚠️ Путь к программе не указан в меню «Параметры». Пожалуйста, укажите путь к .exe в настройках.");
-      if (typeof openSettingsModal === "function") {
-        openSettingsModal();
-      }
-    } else {
-      showOperationError(error);
-    }
+    showOperationError(error);
   }
 }
 
@@ -4550,53 +4541,6 @@ function closeSettingsModal() {
   if (els.settingsModal) els.settingsModal.hidden = true;
 }
 
-async function autoDetectWindowsApps() {
-  const btn = document.getElementById("settingsAutoDetectBtn");
-  const prevText = btn ? btn.textContent : "";
-  if (btn) {
-    btn.disabled = true;
-    btn.textContent = "⏳ Опрос Windows...";
-  }
-  showToast("Определение программ по умолчанию в Windows...");
-  try {
-    const res = await fetch("/api/config/apps/autodetect", {
-      method: "POST",
-      headers: { Accept: "application/json" }
-    });
-    if (!res.ok) {
-      throw new Error(`Сервер вернул статус HTTP ${res.status}`);
-    }
-    const data = await res.json();
-    const detected = data.detected || {};
-    let filledCount = 0;
-
-    document.querySelectorAll("#settingsAppsForm .settings-input").forEach((input) => {
-      const rawExts = String(input.dataset.exts || "").toLowerCase();
-      const exts = rawExts.split(",").map((e) => e.trim()).filter(Boolean);
-      for (const ext of exts) {
-        if (detected[ext]) {
-          input.value = detected[ext];
-          filledCount++;
-          break;
-        }
-      }
-    });
-
-    if (filledCount > 0) {
-      showToast(`Найдено и заполнено категорий: ${filledCount}. Нажмите «Сохранить»!`);
-    } else {
-      showToast("В Windows не найдены пути к программам. Укажите их через кнопку «Обзор…».");
-    }
-  } catch (err) {
-    showToast(`Ошибка автоопределения: ${err.message || err}`);
-  } finally {
-    if (btn) {
-      btn.disabled = false;
-      btn.textContent = prevText;
-    }
-  }
-}
-
 async function saveSettings() {
   const cfg = {
     useNativeApps: state.appSettings?.useNativeApps !== false,
@@ -4628,42 +4572,23 @@ async function saveSettings() {
 async function browseExeForSetting(inputId) {
   const input = document.getElementById(inputId);
   if (!input) return;
-  const currentBtn = document.querySelector(`.settings-browse-btn[data-target="${inputId}"]`);
-  const prevText = currentBtn ? currentBtn.textContent : "Обзор…";
-  if (currentBtn) {
-    currentBtn.disabled = true;
-    currentBtn.textContent = "Выбор…";
-  }
-  showToast("Открывается диалог выбора файла Windows...");
   try {
-    const res = await fetch("/api/choose-exe", {
-      method: "POST",
-      headers: { Accept: "application/json" }
-    });
-    if (!res.ok) {
-      throw new Error(`Сервер вернул статус HTTP ${res.status}`);
-    }
+    const res = await fetch("/api/choose-exe");
     const data = await res.json();
     if (data.path) {
       input.value = data.path;
-      showToast("Выбран файл: " + data.path);
     } else if (data.error) {
-      showToast(data.error);
+      showOperationError(new Error(data.error));
     }
   } catch (err) {
-    showToast(`Ошибка открытия диалога: ${err.message || err}`);
-  } finally {
-    if (currentBtn) {
-      currentBtn.disabled = false;
-      currentBtn.textContent = prevText;
-    }
+    showOperationError(err);
   }
 }
+
 if (els.btnSettings) els.btnSettings.addEventListener("click", openSettingsModal);
 if (els.settingsCloseBtn) els.settingsCloseBtn.addEventListener("click", closeSettingsModal);
 if (els.settingsCancelBtn) els.settingsCancelBtn.addEventListener("click", closeSettingsModal);
 if (els.settingsSaveBtn) els.settingsSaveBtn.addEventListener("click", saveSettings);
-if (els.settingsAutoDetectBtn) els.settingsAutoDetectBtn.addEventListener("click", autoDetectWindowsApps);
 if (els.settingsModal) {
   els.settingsModal.addEventListener("click", (event) => {
     if (event.target === els.settingsModal) closeSettingsModal();

@@ -1625,39 +1625,6 @@ textarea:focus {
   overflow-y: auto;
 }
 
-.settings-toolbar {
-  margin-bottom: 14px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.settings-autodetect-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 14px;
-  font-size: 12px;
-  font-weight: 600;
-  color: #0f548c;
-  background: #f0f7ff;
-  border: 1px solid #70c0e8;
-  border-radius: 3px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.settings-autodetect-btn:hover {
-  background: #e2f0fd;
-  border-color: #0078d4;
-  color: #004578;
-}
-
-.settings-autodetect-btn:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
 .settings-lead {
   margin: 0 0 12px 0;
   font-size: 14px;
