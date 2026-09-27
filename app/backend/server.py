@@ -26,10 +26,39 @@ except ImportError:  # pragma: no cover - reported through the local API
     openpyxl = None
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-FRONTEND_DIR = REPO_ROOT / "app" / "frontend"
+if getattr(sys, 'frozen', False):
+    REPO_ROOT = Path(sys.executable).resolve().parent
+else:
+    # Проверяем, не лежит ли файл внутри _internal
+    p = Path(__file__).resolve()
+    if "_internal" in p.parts:
+        idx = p.parts.index("_internal")
+        REPO_ROOT = Path(*p.parts[:idx])
+    else:
+        REPO_ROOT = p.parents[2]
 RUNTIME_DIR = REPO_ROOT / "runtime"
 MANIFESTS_DIR = RUNTIME_DIR / "manifests"
+
+
+def _bundled_dir(*relative: str) -> Path:
+    """Найти bundled-ресурс: сначала от REPO_ROOT, затем в sys._MEIPASS.
+
+    PyInstaller 6 в режиме onedir кладёт --add-data в подпапку _internal.
+    В installed-раскладке (Inno Setup) всё лежит рядом с EXE и _MEIPASS
+    не нужен; в dev-режиме его нет вообще.
+    """
+    candidate = REPO_ROOT.joinpath(*relative)
+    if candidate.exists():
+        return candidate
+    meipass = getattr(sys, '_MEIPASS', '')
+    if meipass:
+        bundled = Path(str(meipass)).joinpath(*relative)
+        if bundled.exists():
+            return bundled
+    return candidate
+
+
+FRONTEND_DIR = _bundled_dir("app", "frontend")
 PDF_CACHE_DIR = RUNTIME_DIR / "cache" / "pdf"
 WORD_CACHE_DIR = RUNTIME_DIR / "cache" / "word"
 EXCEL_CACHE_DIR = RUNTIME_DIR / "cache" / "excel"
@@ -2561,6 +2590,9 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 )
                 # Доводчик: диалог должен открыться главным окном, а не значком в фоне.
                 _bring_window_to_front(None, "#32770", 115.0, "Select object folder")
+                # ВАЖНО: без hidden_process_kwargs() — флаг STARTF_USESHOWWINDOW
+                # с wShowWindow=0 прячет модальное окно FolderBrowserDialog.
+                # Диалог выбора папки обязан открываться поверх лаунчера.
                 proc = subprocess.run(
                     [
                         "powershell.exe",
@@ -2576,7 +2608,6 @@ class LauncherHandler(BaseHTTPRequestHandler):
                     encoding="utf-8",
                     errors="strict",
                     timeout=120,
-                    **hidden_process_kwargs(),
                 )
                 selected = proc.stdout.strip().splitlines()[0].strip() if proc.stdout.strip() else ""
                 if selected:

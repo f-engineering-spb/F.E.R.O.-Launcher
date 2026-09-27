@@ -17,6 +17,10 @@ python -m PyInstaller --noconfirm --onedir --windowed --name "FEngineeringLaunch
 if %ERRORLEVEL% EQU 0 (
     echo [OK] FEngineeringLauncher.exe собран в dist\FEngineeringLauncher\
     dir "dist\FEngineeringLauncher\FEngineeringLauncher.exe"
+    echo [INFO] Mirror data for frozen mode...
+    if exist "version.json" copy /Y "version.json" "dist\FEngineeringLauncher\" >nul
+    if exist "scripts" xcopy /E /I /Q /Y "scripts" "dist\FEngineeringLauncher\scripts" >nul
+    if exist "runtime\manifests\*.json" xcopy /Q /Y "runtime\manifests\*.json" "dist\FEngineeringLauncher\runtime\manifests\" >nul
 ) else (
     echo [ERROR] Сборка завершилась с ошибкой.
 )
