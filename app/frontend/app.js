@@ -1023,10 +1023,7 @@ function selectNode(node, event = {}, options = {}) {
     if (state.selectedPaths.has(node.path)) state.selectedPaths.delete(node.path);
     else state.selectedPaths.add(node.path);
     state.lastSelectedIndex = index;
-  } else if (state.selectedPaths.size === 1 && state.selectedPaths.has(node.path)) {
-    // Повторный клик по единственно выбранному — снять выделение.
-    state.selectedPaths.clear();
-    state.lastSelectedIndex = index;
+
   } else {
     state.selectedPaths.clear();
     state.selectedPaths.add(node.path);
@@ -1091,7 +1088,19 @@ function syncSelectionToPreview(fileNode) {
       const isStage = Boolean(els.pdfViewer?.classList.contains("stage-active"));
       showPdfPage(matchedPage, { skipTreeScroll: true, activateStage: isStage });
       const key = pageKey(matchedPage);
-      const thumbEl = els.pdfThumbs.querySelector(`.pdf-thumb[data-page-key="${CSS.escape(key)}"]`);
+      let thumbEl = Array.from(els.pdfThumbs?.querySelectorAll(".pdf-thumb") || []).find(
+        (el) => el.dataset.pageKey === key
+      );
+      if (!thumbEl) {
+        thumbEl = Array.from(els.pdfThumbs?.querySelectorAll(".pdf-thumb") || []).find((el) => {
+          const p = state.renderedPages.find((x) => {
+            try { return pageKey(x) === el.dataset.pageKey; } catch (_) { return false; }
+          });
+          if (!p) return false;
+          const pPath = (p.previewFor?.path || p.sourcePath || p.documentPath || p.path || "").replace(/\//g, "\\").toLowerCase();
+          return pPath === norm;
+        });
+      }
       if (thumbEl) {
         thumbEl.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
       }
@@ -1405,19 +1414,24 @@ function revealPathInTree(path, options = {}) {
   if (nodeIndex >= 0 && shouldUpdateSelection) state.lastSelectedIndex = nodeIndex;
 
   let row = null;
-  try {
-    row = els.objectTree.querySelector(`.tree-row[data-path="${CSS.escape(path)}"]`);
-    if (!row) {
-      const rows = els.objectTree.querySelectorAll(".tree-row");
-      for (const r of rows) {
-        if (String(r.dataset.path || "").replace(/\//g, "\\").toLowerCase() === norm) {
-          row = r;
-          break;
-        }
+  const pathFileName = path.split(/[\/\\]/).pop().toLowerCase().trim();
+  const rows = els.objectTree.querySelectorAll(".tree-row");
+  for (const r of rows) {
+    const rPath = String(r.dataset.path || "").replace(/\//g, "\\").toLowerCase();
+    if (rPath === norm) {
+      row = r;
+      break;
+    }
+  }
+  if (!row && pathFileName) {
+    for (const r of rows) {
+      const rPath = String(r.dataset.path || "").replace(/\//g, "\\").toLowerCase();
+      const rName = rPath.split(/[\/\\]/).pop().toLowerCase().trim();
+      if (rName === pathFileName) {
+        row = r;
+        break;
       }
     }
-  } catch {
-    row = null;
   }
 
   // Если строка ещё не в DOM (родительская папка свёрнута) — раскрываем только нужных родителей
@@ -1727,18 +1741,13 @@ function renderFormats() {
         chipClickTimer = null;
       }, 260);
 
-      // Spec PDF: одиночный клик — соло-выбор формата (суммирования нет).
-      // Повторный клик по активному — снять всё.
+      // Одиночный клик по чипу формата: фильтрация дерева по расширению.
+      // Не выделяем все файлы скопом (все файлы выделяет и рендерит только двойной клик по чипу).
       const wasSoloActive = state.activeFilters.size === 1 && state.activeFilters.has(ext);
       state.activeFilters.clear();
       state.selectedPaths.clear();
       if (!wasSoloActive) {
         state.activeFilters.add(ext);
-        if (state.currentManifest?.tree) {
-          flattenTree(state.currentManifest.tree, [])
-            .filter((node) => node.type === "file" && node.extension === ext)
-            .forEach((node) => state.selectedPaths.add(node.path));
-        }
       }
       renderFormats();
       renderTree();
@@ -3296,7 +3305,7 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
     // повторяем один раз — сервер тем временем продолжает рендер и греет
     // кэш, повтор обычно забирает уже готовые страницы.
     const batchTimeout = isDwg ? 600000 : isWord ? 180000 : isExcel ? 180000
-      : Math.min(PDF_FETCH_TIMEOUT_MS, 30000 * Math.max(1, itemsToFetch.length));
+      : Math.max(180000, Math.min(PDF_FETCH_TIMEOUT_MS, 60000 * Math.max(1, itemsToFetch.length)));
     let controller = null;
     let attempt = 0;
     let batchDone = false;
@@ -4085,7 +4094,9 @@ function stepThumbnails(delta) {
       revealPathInTree(targetDocPath, { updateSelection: true, skipScroll: false });
     }
     const key = pageKey(nextPage);
-    const thumbEl = els.pdfThumbs?.querySelector(`.pdf-thumb[data-page-key="${CSS.escape(key)}"]`);
+    const thumbEl = Array.from(els.pdfThumbs?.querySelectorAll(".pdf-thumb") || []).find(
+      (el) => el.dataset.pageKey === key
+    );
     if (thumbEl) {
       thumbEl.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
     }

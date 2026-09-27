@@ -1260,55 +1260,52 @@ def render_dwg_model(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
         document["previewMode"] = "cad-smart-layouts"
         return document
 
-    # 2. Level 1: Моментальное извлечение встроенного растра из заголовка DWG (< 1 мс)
-    cached_png = target_dir / "page-1.png"
-    if not (cached_png.exists() and cached_png.stat().st_size > 0):
+    # 2. Основной режим: качественный векторный рендеринг модели через dwg_to_model_pdf
+    try:
+        pdf_path, convert_cache_hit = dwg_to_model_pdf(path)
+        document = render_pdf(pdf_path, dpi=dpi, page_timeout_seconds=DWG_MODEL_PAGE_TIMEOUT_SECONDS)
+        document["name"] = path.name
+        document["sourcePath"] = str(path)
+        document["sourceName"] = path.name
+        document["sourceType"] = "DWG"
+        document["convertedPdfPath"] = str(pdf_path)
+        document["convertCacheHit"] = convert_cache_hit
+        document["previewMode"] = "cad-smart-layouts"
+        return document
+    except Exception as render_err:
+        # 3. Fallback: если CAD-конвертер недоступен или выдал ошибку, берем встроенный эскиз
+        cached_png = target_dir / "page-1.png"
         raster_bytes = extract_dwg_embedded_raster(path)
         if raster_bytes:
             cached_png.write_bytes(raster_bytes)
-
-    if cached_png.exists() and cached_png.stat().st_size > 0:
-        # Запускаем фоновый рендеринг через AutoCAD COM в отдельном потоке (non-blocking)
-        trigger_bg_dwg_render(path, dpi)
-        return {
-            "name": path.name,
-            "path": str(path),
-            "sourcePath": str(path),
-            "sourceName": path.name,
-            "sourceType": "DWG",
-            "dpi": dpi,
-            "pages": 1,
-            "renderedPages": 1,
-            "cacheKey": key,
-            "cacheHit": True,
-            "cacheHitPages": 1,
-            "newRenderedPages": 0,
-            "errors": [],
-            "items": [
-                {
-                    "page": 1,
-                    "name": f"{path.name} · стр. 1",
-                    "url": f"/cache/dwg/{key}/page-1.png",
-                    "bytes": cached_png.stat().st_size,
-                }
-            ],
-            "status": "ok",
-            "convertedPdfPath": "",
-            "convertCacheHit": True,
-            "previewMode": "cad-smart-layouts",
-        }
-
-    # 3. Fallback: если встроенного превью не обнаружено, синхронный рендеринг
-    pdf_path, convert_cache_hit = dwg_to_model_pdf(path)
-    document = render_pdf(pdf_path, dpi=dpi, page_timeout_seconds=DWG_MODEL_PAGE_TIMEOUT_SECONDS)
-    document["name"] = path.name
-    document["sourcePath"] = str(path)
-    document["sourceName"] = path.name
-    document["sourceType"] = "DWG"
-    document["convertedPdfPath"] = str(pdf_path)
-    document["convertCacheHit"] = convert_cache_hit
-    document["previewMode"] = "cad-smart-layouts"
-    return document
+            return {
+                "name": path.name,
+                "path": str(path),
+                "sourcePath": str(path),
+                "sourceName": path.name,
+                "sourceType": "DWG",
+                "dpi": dpi,
+                "pages": 1,
+                "renderedPages": 1,
+                "cacheKey": key,
+                "cacheHit": True,
+                "cacheHitPages": 1,
+                "newRenderedPages": 0,
+                "errors": [],
+                "items": [
+                    {
+                        "page": 1,
+                        "name": f"{path.name} · эскиз",
+                        "url": f"/cache/dwg/{key}/page-1.png",
+                        "bytes": cached_png.stat().st_size,
+                    }
+                ],
+                "status": "ok",
+                "convertedPdfPath": "",
+                "convertCacheHit": False,
+                "previewMode": "cad-smart-layouts",
+            }
+        raise render_err
 
 
 def set_windows_clipboard(text: str) -> bool:
@@ -2517,7 +2514,10 @@ def render_pdf(
     _FITZ_RENDER_LOCK.acquire()
     try:
         import fitz
-        doc = fitz.open(str(path))
+        try:
+            doc = fitz.open(str(path))
+        except Exception:
+            doc = fitz.open(stream=path.read_bytes(), filetype="pdf")
         page_count = len(doc)
         pages = []
         errors = []
