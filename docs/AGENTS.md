@@ -269,3 +269,18 @@ git switch dvg-main
 - **Запрещённая папка:** `C:\Users\a9379\Documents\Codex\FEngineering_Launcher_v3_OLD_DO_NOT_USE`
 - **Хелпер запуска:** В корне репозитория создан скрипт `RUN_AGENT.cmd` для удобного запуска CLI-агента со считыванием задачи из `prompt.txt`.
 
+### 13. Контракт нативного открытия файлов (NATIVE FILE OPENING CONTRACT)
+
+Строго соблюдать правила из `docs/NATIVE_FILE_OPENING_CONTRACT.md`:
+1. **Приоритет A:** Если в Параметрах сохранён валидный путь к EXE, запускать **ТОЛЬКО** этот EXE отдельными аргументами `[exe, file]`. Никакого fallback на Windows default, никакой подмены на AutoCAD/DWG TrueView.
+2. **Приоритет B:** Если настройка пуста, использовать системную ассоциацию Windows (`ShellExecuteW` / `os.startfile`).
+3. **Приоритет C:** Если настройка заполнена, но EXE не существует/недоступен, возвращать ошибку `configured_app_missing` **БЕЗ ТИХОГО FALLBACK**. Фронтенд выводит уведомление и открывает окно Параметров.
+4. **Запрет AcLauncher:** Autodetect и импорт обязаны фильтровать `AcLauncher.exe` и `ZwLauncher.exe` для `.dwg`/`.dxf`. В режиме замены `replace_confirmed` поле DWG не очищается, если Windows возвращает системный launcher.
+5. **Разделение ответственности:** Чтение конфигурации (`load_native_apps_config`), первичная инициализация (`ensure_native_apps_first_run_initialized`), импорт ассоциаций Windows (`import_windows_default_app_mappings`) и запуск файла (`launch_native_file`) — строго изолированные функции. Их запрещено объединять в одну. `load_native_apps_config` обязана быть pure read/migration функцией без побочных записей на диск.
+6. **Обязательный тест:** Перед коммитом всегда запускать:
+   ```powershell
+   python -m unittest tests/test_native_open_contract.py -v
+   ```
+
+
+

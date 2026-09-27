@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>F-Engineering Launcher v3</title>
-  <link rel="stylesheet" href="styles.css?v=20260913-buttons-left-4">
+  <link rel="stylesheet" href="styles.css?v=20260928-winapp-import-fetchfix">
 </head>
 <body>
   <div class="app-window">
@@ -167,10 +167,17 @@
           Кнопка «Обзор…» поможет найти файл. Пустое поле — этот тип открывается только через меню правой кнопки.
         </div>
         <div class="settings-toolbar">
-          <button type="button" class="settings-autodetect-btn" id="settingsAutoDetectBtn" title="Найти в реестре Windows установленные программы по умолчанию и подставить пути">
-            ⚡ Заполнить параметры по умолчанию из Windows
+          <button type="button" class="settings-btn" id="settingsFillEmptyBtn" title="Найти ассоциации Windows и заполнить только пустые поля, не затрагивая существующие настройки">
+            ⚡ Заполнить пустые поля из Windows
+          </button>
+          <button type="button" class="settings-btn settings-btn-warning" id="settingsReplaceBtn" title="Заменить сохранённые приложения программами по умолчанию Windows (с подтверждением)">
+            🔄 Заменить сохранённые приложения данными Windows…
+          </button>
+          <button type="button" class="settings-btn" id="settingsOpenWinSettingsBtn" title="Открыть раздел «Приложения по умолчанию» в параметрах Windows">
+            ⚙ Открыть настройки приложений Windows
           </button>
         </div>
+        <div id="settingsDwgHint" class="settings-dwg-hint" hidden></div>
         <div class="settings-form" id="settingsAppsForm"></div>
       </div>
       <div class="modal-footer">
@@ -182,6 +189,6 @@
 
   <div id="toast" class="toast" hidden aria-live="polite"></div>
   <div id="contextMenu" class="context-menu" hidden></div>
-    <script src="app.js?v=20260927-ctxmenu-fix2"></script>
+    <script src="app.js?v=20260928-winapp-import-fetchfix"></script>
 </body>
 </html>
