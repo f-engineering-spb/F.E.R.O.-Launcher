@@ -269,3 +269,16 @@ git switch dvg-main
 - **Запрещённая папка:** `C:\Users\a9379\Documents\Codex\FEngineering_Launcher_v3_OLD_DO_NOT_USE`
 - **Хелпер запуска:** В корне репозитория создан скрипт `RUN_AGENT.cmd` для удобного запуска CLI-агента со считыванием задачи из `prompt.txt`.
 
+### 13. Контракт нативного открытия файлов (NATIVE FILE OPENING CONTRACT)
+
+Строго соблюдать правила из `docs/NATIVE_FILE_OPENING_CONTRACT.md`:
+1. **Приоритет A:** Если в Параметрах сохранён валидный путь к EXE, запускать **ТОЛЬКО** этот EXE отдельными аргументами `[exe, file]`. Никакого fallback на Windows default, никакой подмены на AutoCAD/DWG TrueView.
+2. **Приоритет B:** Если настройка пуста, использовать системную ассоциацию Windows (`ShellExecuteW` / `os.startfile`).
+3. **Приоритет C:** Если настройка заполнена, но EXE не существует/недоступен, возвращать ошибку `configured_app_missing` **БЕЗ ТИХОГО FALLBACK**. Фронтенд выводит уведомление и открывает окно Параметров.
+4. **Запрет AcLauncher:** Autodetect обязан фильтровать `AcLauncher.exe` и `ZwLauncher.exe` для `.dwg`/`.dxf`.
+5. **Обязательный тест:** Перед коммитом всегда запускать:
+   ```powershell
+   python -m unittest tests/test_native_open_contract.py -v
+   ```
+
+

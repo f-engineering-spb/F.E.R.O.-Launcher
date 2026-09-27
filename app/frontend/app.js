@@ -512,7 +512,19 @@ async function openFileByPath(path, action) {
       body: JSON.stringify({ path, action: act }),
     });
     const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || "Не удалось открыть файл");
+    if (!response.ok) {
+      if (payload.error_code === "configured_app_missing") {
+        const ext = (payload.details && payload.details.extension)
+          ? payload.details.extension.toUpperCase().replace(".", "")
+          : "DWG";
+        const msg = `Для файлов ${ext} указано недоступное приложение. Проверьте Параметры → Приложения.`;
+        showNotice(msg);
+        showToast(msg);
+        openSettingsModal(payload.details && payload.details.extension);
+        return;
+      }
+      throw new Error(payload.error || "Не удалось открыть файл");
+    }
     finishProgress("Открыто: " + actLabel);
     showToast("Файл запущен: " + actLabel);
     if (payload.longPathWarning) showNotice(payload.longPathWarning);
@@ -4697,17 +4709,33 @@ document.addEventListener("keydown", (event) => {
 window.addEventListener("resize", () => hideFileContextMenu());
 
 // Управление модальным окном "Параметры"
-async function openSettingsModal() {
+async function openSettingsModal(highlightExt) {
   try {
     const res = await fetch("/api/config/apps");
     if (res.ok) {
       const cfg = await res.json();
-
       renderSettingsAppRows(cfg);
     }
   } catch (err) {
   }
-  if (els.settingsModal) els.settingsModal.hidden = false;
+  if (els.settingsModal) {
+    els.settingsModal.hidden = false;
+    if (highlightExt) {
+      const norm = String(highlightExt).toLowerCase();
+      const dot = norm.startsWith(".") ? norm : "." + norm;
+      const targetInput = Array.from(document.querySelectorAll("#settingsAppsForm .settings-input")).find(
+        (inp) => (inp.dataset.exts || "").split(",").map((e) => e.trim().toLowerCase()).includes(dot)
+      );
+      if (targetInput) {
+        setTimeout(() => {
+          targetInput.focus();
+          targetInput.select?.();
+          targetInput.classList.add("input-updated");
+          setTimeout(() => targetInput.classList.remove("input-updated"), 2000);
+        }, 100);
+      }
+    }
+  }
 }
 
 function closeSettingsModal() {
@@ -4716,6 +4744,18 @@ function closeSettingsModal() {
 
 
 async function autoDetectWindowsApps() {
+  const inputs = Array.from(document.querySelectorAll("#settingsAppsForm .settings-input"));
+  const hasManualSettings = inputs.some((inp) => inp.value && inp.value.trim());
+
+  if (hasManualSettings) {
+    const confirmed = confirm(
+      "В настройках уже указаны программы. Заполнить/заменить настройки значениями по умолчанию из Windows?"
+    );
+    if (!confirmed) {
+      return;
+    }
+  }
+
   const btn = document.getElementById("settingsAutoDetectBtn");
   const prevText = btn ? btn.textContent : "";
   if (btn) {
@@ -4734,7 +4774,7 @@ async function autoDetectWindowsApps() {
     const data = await res.json();
     const detected = data.detected || {};
     let filledCount = 0;
-    document.querySelectorAll("#settingsAppsForm .settings-input").forEach((input) => {
+    inputs.forEach((input) => {
       const exts = String(input.dataset.exts || "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
       for (const ext of exts) {
         if (detected[ext]) {
@@ -4744,6 +4784,12 @@ async function autoDetectWindowsApps() {
         }
       }
     });
+
+    const dwgInput = document.getElementById("settingDwgExe");
+    if (dwgInput && !dwgInput.value) {
+      showNotice("Для DWG укажите прямой путь к DWG Viewer или AutoCAD через «Обзор…»");
+    }
+
     if (filledCount > 0) {
       showToast(`Успешно заполнено категорий: ${filledCount}. Нажмите «Сохранить»!`);
     } else {
