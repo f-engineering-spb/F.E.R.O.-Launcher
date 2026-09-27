@@ -35,7 +35,7 @@ if (Test-Path -LiteralPath $nativeExportScript) {
       $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) "FEng_dwg_native_$sessionGuid"
       $targetPdf = if (-not [string]::IsNullOrWhiteSpace($OutputPath)) { $OutputPath } else { [System.IO.Path]::ChangeExtension($InputPath, ".pdf") }
       $tempPdf = Join-Path $tempDir "native_export.pdf"
-      $r = Invoke-NativeDwgPdfExport -InputPath $InputPath -OutputPdf $tempPdf -WorkDir $tempDir -TimeoutSec 240
+      $r = Invoke-NativeDwgPdfExport -InputPath $InputPath -OutputPdf $tempPdf -WorkDir $tempDir -TimeoutSec 600
       if ((Test-Path -LiteralPath $tempPdf) -and (Get-Item -LiteralPath $tempPdf).Length -gt 1024) {
         $finalDestination = $targetPdf
         try {

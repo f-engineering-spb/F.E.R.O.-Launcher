@@ -480,8 +480,25 @@ function getNativeAppLabel(ext = "") {
 }
 
 
+let isOpeningFile = false;
+let lastOpenedPath = "";
+let lastOpenedTime = 0;
+
 async function openFileByPath(path, action) {
   if (!path) return;
+  const now = Date.now();
+  if (isOpeningFile && (now - lastOpenedTime < 1800)) {
+    console.warn("[Launcher] openFileByPath ignored: already in progress", path);
+    return;
+  }
+  if (lastOpenedPath === path && (now - lastOpenedTime < 1800)) {
+    console.warn("[Launcher] openFileByPath ignored: rapid repeat call for same path", path);
+    return;
+  }
+  isOpeningFile = true;
+  lastOpenedPath = path;
+  lastOpenedTime = now;
+
   const act = String(action || "explorer");
   const rawExt = extOfPath(path);
   const custom = settingsCustomExe(rawExt);
@@ -506,6 +523,10 @@ async function openFileByPath(path, action) {
   } catch (error) {
     console.error("[Launcher] Failed to open file:", error);
     showOperationError(error);
+  } finally {
+    setTimeout(() => {
+      isOpeningFile = false;
+    }, 1200);
   }
 }
 

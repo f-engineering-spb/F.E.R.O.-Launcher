@@ -65,6 +65,19 @@ function Invoke-NativeDwgPdfExport {
   $scrFile = Join-Path $WorkDir "native_export.scr"
   $consoleLog = Join-Path $WorkDir "native_export.log"
 
+  # Stage network/cloud drives (H:, G:, \\) to local SSD WorkDir for fast I/O
+  $effectiveInput = $InputPath
+  $stagedLocal = $false
+  $rootPath = [System.IO.Path]::GetPathRoot($InputPath)
+  if ($rootPath -and ($rootPath.StartsWith('\\') -or $rootPath.StartsWith('H:') -or $rootPath.StartsWith('G:') -or $rootPath.StartsWith('Z:'))) {
+    try {
+      $localCopy = Join-Path $WorkDir ([System.IO.Path]::GetFileName($InputPath))
+      Copy-Item -LiteralPath $InputPath -Destination $localCopy -Force -ErrorAction Stop
+      $effectiveInput = $localCopy
+      $stagedLocal = $true
+    } catch {}
+  }
+
   $normalizedOut = $OutputPdf.Replace('\', '/')
   $scriptLines = @(
     '(setvar "EXPERT" 5)',
@@ -75,8 +88,8 @@ function Invoke-NativeDwgPdfExport {
     ('  (command "_.-EXPORT" "_PDF" "_E" "_N" "{0}")' -f $normalizedOut),
     ('  (command "_.-EXPORT" "_PDF" "_C" "_N" "{0}")' -f $normalizedOut),
     ')',
-    '_QUIT',
-    '_Y'
+    '_.QUIT',
+    '_N'
   )
   [System.IO.File]::WriteAllLines($scrFile, $scriptLines, [System.Text.Encoding]::ASCII)
 
@@ -85,7 +98,7 @@ function Invoke-NativeDwgPdfExport {
 
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = $accore
-  $psi.Arguments = ('/i "{0}" /s "{1}"' -f $InputPath, $scrFile)
+  $psi.Arguments = ('/i "{0}" /s "{1}" /readonly' -f $effectiveInput, $scrFile)
   $psi.UseShellExecute = $false
   $psi.CreateNoWindow = $true
   $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
@@ -104,6 +117,9 @@ function Invoke-NativeDwgPdfExport {
   } finally {
     try { if (-not $proc.HasExited) { $proc.Kill() } } catch {}
     try { $proc.Dispose() } catch {}
+    if ($stagedLocal -and (Test-Path -LiteralPath $effectiveInput)) {
+      try { Remove-Item -LiteralPath $effectiveInput -Force -ErrorAction SilentlyContinue } catch {}
+    }
   }
 
   if (-not (Test-Path -LiteralPath $OutputPdf)) {

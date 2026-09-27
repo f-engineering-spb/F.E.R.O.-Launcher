@@ -976,7 +976,23 @@ def dwg_convert_process(
     fallback_pdf: Path,
     script_to_run: Path,
 ) -> subprocess.CompletedProcess:
-    """Конвертация через одну CAD-сессию; при недоступности демона — разово."""
+    """Конвертация DWG в PDF: сначала быстрый нативный accoreconsole + _.-EXPORT _PDF, при сбое — CAD-сессия."""
+    # 1. ПРИОРИТЕТ: Консоль accoreconsole.exe + нативная команда _.-EXPORT _PDF.
+    # Запускается за доли секунды, не поднимает GUI, не мигает окнами, не тратит память на ленту.
+    try:
+        proc = dwg_convert_oneshot(
+            script_to_run=script_to_run,
+            input_path=path,
+            output_path=paired_pdf,
+            fallback_path=fallback_pdf,
+            timeout_seconds=DWG_RENDER_TIMEOUT_SECONDS,
+        )
+        if proc.returncode == 0:
+            return proc
+    except Exception:
+        pass
+
+    # 2. РЕЗЕРВ: CAD COM демон (если accoreconsole не найден)
     try:
         return dwg_convert_via_daemon(
             input_path=path,
@@ -986,7 +1002,7 @@ def dwg_convert_process(
         )
     except (TimeoutError, _DwgFileError):
         raise
-    except Exception as err:
+    except Exception:
         return dwg_convert_oneshot(
             script_to_run=script_to_run,
             input_path=path,
@@ -1844,9 +1860,60 @@ def launch_custom_app(exe_path: str, file_path: Path) -> str:
     exe_dir = os.path.dirname(resolved_exe)
     file_dir = os.path.dirname(resolved_file)
 
+    exe_name = os.path.basename(resolved_exe).lower()
+    suffix = file_path.suffix.lower()
+
     if os.name != "nt":
         subprocess.Popen([resolved_exe, resolved_file], cwd=file_dir)
         return f"custom-app:{Path(resolved_exe).name}"
+
+    # Если открывается чертеж DWG/DXF или программа — AutoCAD / DWG TrueView:
+    if suffix in {".dwg", ".dxf"} or exe_name in {"dwgviewr.exe", "acad.exe"}:
+        # 1. Проверяем, запущен ли уже CAD (AutoCAD или DWG TrueView)
+        is_cad_running = False
+        try:
+            import psutil
+            cad_names = {"dwgviewr.exe", "acad.exe"}
+            for p in psutil.process_iter(["name"]):
+                try:
+                    if p.name().lower() in cad_names:
+                        is_cad_running = True
+                        break
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+        except Exception:
+            pass
+
+        # 2. Если уже открыт AutoCAD: передаем файл через COM прямо в открытую сессию
+        if is_cad_running and exe_name == "acad.exe":
+            try:
+                import win32com.client
+                cad = win32com.client.GetActiveObject("AutoCAD.Application")
+                cad.Visible = True
+                cad.Documents.Open(resolved_file)
+                bring_native_window_to_front(0, "acad.exe")
+                _bring_window_to_front(None, None, 120.0, file_path.name, 3)
+                return "custom-app-cad-com:acad.exe"
+            except Exception:
+                pass
+
+        # 3. Autodesk AcLauncher (официальный маршрутизатор Autodesk Shell Extension):
+        # Если Viewer/AutoCAD уже открыт — AcLauncher передаёт файл в УЖЕ открытый процесс без создания второго процесса.
+        # Если не открыт — запускает зарегистрированный вьювер.
+        ac_launcher = Path(r"C:\Program Files\Common Files\Autodesk Shared\AcShellEx\AcLauncher.exe")
+        if ac_launcher.is_file():
+            try:
+                creationflags = getattr(subprocess, "DETACHED_PROCESS", 0x00000008) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+                subprocess.Popen(
+                    [str(ac_launcher), "/O", resolved_file],
+                    cwd=file_dir,
+                    creationflags=creationflags,
+                )
+                bring_native_window_to_front(0, resolved_exe)
+                _bring_window_to_front(None, None, 120.0, file_path.name, 3)
+                return f"custom-app-aclauncher:{exe_name}"
+            except Exception:
+                pass
 
     # 1. ShellExecuteW("open", resolved_exe, f'"{resolved_file}"', file_dir, SW_SHOWNORMAL=1)
     # Программа открывается полностью независимо от текущего процесса/Job Object,
@@ -1923,6 +1990,8 @@ def launch_native_file(path: Path) -> str:
     return launch_system_default(path)
 
 NATIVE_OPEN_LOG_LOCK = threading.Lock()
+_OPEN_FILE_LOCK = threading.Lock()
+_LAST_OPENED_TARGETS: dict[str, float] = {}
 
 
 def append_native_open_log(event: dict) -> None:
@@ -3426,6 +3495,28 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 if not target.exists():
                     raise FileNotFoundError(f"Файл не найден: {target}")
                 opened_path = str(target)
+
+                # Защита от двойного запуска (двойной клик пользователя или повторный вызов)
+                target_key = str(target).casefold()
+                now_ts = time.perf_counter()
+                with _OPEN_FILE_LOCK:
+                    last_time = _LAST_OPENED_TARGETS.get(target_key, 0.0)
+                    if (now_ts - last_time) < 1.8:
+                        self.send_json(
+                            HTTPStatus.OK,
+                            {
+                                "ok": True,
+                                "path": str(target),
+                                "openedPath": opened_path,
+                                "mode": "deduplicated",
+                                "longPathWarning": None,
+                            },
+                        )
+                        return
+                    _LAST_OPENED_TARGETS[target_key] = now_ts
+                    if len(_LAST_OPENED_TARGETS) > 100:
+                        _LAST_OPENED_TARGETS.clear()
+
                 suffix = target.suffix.casefold() if target.is_file() else ""
                 # Google Drive shortcuts (.gsheet / .gdoc / .gslides) are virtual
                 # reparse points, not real Office documents.  Launching them
