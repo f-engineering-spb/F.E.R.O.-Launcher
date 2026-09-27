@@ -1102,97 +1102,6 @@ _DWG_BG_LOCK = threading.Lock()
 _DWG_BG_ACTIVE: set[str] = set()
 
 
-def extract_dwg_embedded_raster(path: Path) -> bytes | None:
-    """Извлекает встроенный превью-растр (PNG или BMP) из бинарного заголовка DWG за доли миллисекунды."""
-    try:
-        with open(path, "rb") as f:
-            header = f.read(1024)
-            if len(header) < 0x20:
-                return None
-            sentinel = b"\x1f\x25\x6d\x07\xd4\x36\x28\x28\x9d\x57\xca\x3f\x9d\x44\x10\x2b"
-            sentinel_pos = -1
-            if len(header) >= 0x11:
-                cand_offset = struct.unpack("<I", header[0x0D:0x11])[0]
-                if 0 < cand_offset < 1000000:
-                    f.seek(cand_offset)
-                    check = f.read(16)
-                    if check == sentinel:
-                        sentinel_pos = cand_offset
-            if sentinel_pos == -1:
-                f.seek(0)
-                data_chunk = f.read(65536)
-                sentinel_pos = data_chunk.find(sentinel)
-                if sentinel_pos == -1:
-                    return None
-            f.seek(sentinel_pos + 16)
-            meta = f.read(5)
-            if len(meta) < 5:
-                return None
-            num_images = min(meta[4], 32)
-            for _ in range(num_images):
-                img_desc = f.read(9)
-                if len(img_desc) < 9:
-                    break
-                code = img_desc[0]
-                start_offset = struct.unpack("<I", img_desc[1:5])[0]
-                img_size = struct.unpack("<I", img_desc[5:9])[0]
-                if img_size <= 0:
-                    continue
-                curr_pos = f.tell()
-                f.seek(start_offset)
-                img_data = f.read(img_size)
-                f.seek(curr_pos)
-                if code == 6 or img_data.startswith(b"\x89PNG\r\n\x1a\n"):
-                    return img_data
-                elif code == 2 or img_data.startswith(b"BM") or img_data.startswith(b"\x28\x00\x00\x00"):
-                    try:
-                        from PIL import Image
-
-                        if img_data.startswith(b"BM"):
-                            im = Image.open(io.BytesIO(img_data))
-                            out_buf = io.BytesIO()
-                            im.save(out_buf, format="PNG")
-                            return out_buf.getvalue()
-                        elif img_data.startswith(b"\x28\x00\x00\x00"):
-                            bi_bit_count = struct.unpack("<H", img_data[14:16])[0]
-                            bi_clr_used = struct.unpack("<I", img_data[32:36])[0]
-                            num_colors = (1 << bi_bit_count) if (bi_clr_used == 0 and bi_bit_count <= 8) else bi_clr_used
-                            palette_size = num_colors * 4
-                            offset_bits = 14 + 40 + palette_size
-                            bmp_header = b"BM" + struct.pack("<IHHI", 14 + len(img_data), 0, 0, offset_bits)
-                            full_bmp = bmp_header + img_data
-                            im = Image.open(io.BytesIO(full_bmp))
-                            out_buf = io.BytesIO()
-                            im.save(out_buf, format="PNG")
-                            return out_buf.getvalue()
-                    except Exception:
-                        pass
-    except Exception:
-        pass
-    return None
-
-
-def _bg_dwg_render_worker(path: Path, dpi: int) -> None:
-    try:
-        pdf_path, _ = dwg_to_model_pdf(path)
-        render_pdf(pdf_path, dpi=dpi, page_timeout_seconds=DWG_MODEL_PAGE_TIMEOUT_SECONDS)
-    except Exception:
-        pass
-    finally:
-        with _DWG_BG_LOCK:
-            _DWG_BG_ACTIVE.discard(str(path.resolve()).casefold())
-
-
-def trigger_bg_dwg_render(path: Path, dpi: int = DEFAULT_PDF_DPI) -> None:
-    path_key = str(path.resolve()).casefold()
-    with _DWG_BG_LOCK:
-        if path_key in _DWG_BG_ACTIVE:
-            return
-        _DWG_BG_ACTIVE.add(path_key)
-    thread = threading.Thread(target=_bg_dwg_render_worker, args=(path, dpi), daemon=True)
-    thread.start()
-
-
 def render_dwg_model(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
     if not path.exists():
         return {
@@ -1226,7 +1135,6 @@ def render_dwg_model(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
     target_dir.mkdir(parents=True, exist_ok=True)
     fallback_pdf = target_dir / f"{path.stem}.pdf"
     manifest_path = target_dir / "manifest.json"
-
     has_cached_pdf = False
     if paired_pdf.exists() and paired_pdf.is_file() and paired_pdf.stat().st_size > 1024:
         try:
@@ -1234,7 +1142,6 @@ def render_dwg_model(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
                 has_cached_pdf = True
         except OSError:
             pass
-
     if not has_cached_pdf and fallback_pdf.exists() and fallback_pdf.stat().st_size > 1024 and manifest_path.exists():
         try:
             m = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -1248,65 +1155,25 @@ def render_dwg_model(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
         except (OSError, json.JSONDecodeError):
             pass
 
-    if has_cached_pdf:
-        pdf_path, convert_cache_hit = dwg_to_model_pdf(path)
-        document = render_pdf(pdf_path, dpi=dpi, page_timeout_seconds=DWG_MODEL_PAGE_TIMEOUT_SECONDS)
-        document["name"] = path.name
-        document["sourcePath"] = str(path)
-        document["sourceName"] = path.name
-        document["sourceType"] = "DWG"
-        document["convertedPdfPath"] = str(pdf_path)
-        document["convertCacheHit"] = convert_cache_hit
-        document["previewMode"] = "cad-smart-layouts"
-        return document
+    # Если векторного PDF нет, но в кэше лежат старые растровые картинки — очищаем их
+    if not has_cached_pdf:
+        for stale_png in target_dir.glob("page-*.png"):
+            try:
+                stale_png.unlink()
+            except OSError:
+                pass
 
-    # 2. Основной режим: качественный векторный рендеринг модели через dwg_to_model_pdf
-    try:
-        pdf_path, convert_cache_hit = dwg_to_model_pdf(path)
-        document = render_pdf(pdf_path, dpi=dpi, page_timeout_seconds=DWG_MODEL_PAGE_TIMEOUT_SECONDS)
-        document["name"] = path.name
-        document["sourcePath"] = str(path)
-        document["sourceName"] = path.name
-        document["sourceType"] = "DWG"
-        document["convertedPdfPath"] = str(pdf_path)
-        document["convertCacheHit"] = convert_cache_hit
-        document["previewMode"] = "cad-smart-layouts"
-        return document
-    except Exception as render_err:
-        # 3. Fallback: если CAD-конвертер недоступен или выдал ошибку, берем встроенный эскиз
-        cached_png = target_dir / "page-1.png"
-        raster_bytes = extract_dwg_embedded_raster(path)
-        if raster_bytes:
-            cached_png.write_bytes(raster_bytes)
-            return {
-                "name": path.name,
-                "path": str(path),
-                "sourcePath": str(path),
-                "sourceName": path.name,
-                "sourceType": "DWG",
-                "dpi": dpi,
-                "pages": 1,
-                "renderedPages": 1,
-                "cacheKey": key,
-                "cacheHit": True,
-                "cacheHitPages": 1,
-                "newRenderedPages": 0,
-                "errors": [],
-                "items": [
-                    {
-                        "page": 1,
-                        "name": f"{path.name} · эскиз",
-                        "url": f"/cache/dwg/{key}/page-1.png",
-                        "bytes": cached_png.stat().st_size,
-                    }
-                ],
-                "status": "ok",
-                "convertedPdfPath": "",
-                "convertCacheHit": False,
-                "previewMode": "cad-smart-layouts",
-            }
-        raise render_err
-
+    # 2. Рендерим качественную модель DWG через векторный PDF (экспорт или печать)
+    pdf_path, convert_cache_hit = dwg_to_model_pdf(path)
+    document = render_pdf(pdf_path, dpi=dpi, page_timeout_seconds=DWG_MODEL_PAGE_TIMEOUT_SECONDS)
+    document["name"] = path.name
+    document["sourcePath"] = str(path)
+    document["sourceName"] = path.name
+    document["sourceType"] = "DWG"
+    document["convertedPdfPath"] = str(pdf_path)
+    document["convertCacheHit"] = convert_cache_hit
+    document["previewMode"] = "cad-smart-layouts"
+    return document
 
 def set_windows_clipboard(text: str) -> bool:
     if os.name != "nt":
@@ -3219,7 +3086,8 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 file_path = Path(raw_file)
                 key = file_cache_key(file_path, "dwg-smart-cad-v2")
                 cached_png = DWG_CACHE_DIR / key / f"page-{page}.png"
-                if cached_png.exists() and cached_png.stat().st_size > 0:
+                manifest_file = DWG_CACHE_DIR / key / "manifest.json"
+                if cached_png.exists() and cached_png.stat().st_size > 0 and manifest_file.exists():
                     self.send_json(
                         HTTPStatus.OK,
                         {

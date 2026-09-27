@@ -24,6 +24,46 @@ if (-not [string]::IsNullOrWhiteSpace($outputDir) -and -not (Test-Path -LiteralP
   } catch {}
 }
 
+# 1. Попытка штатного экспорта через консоль AutoCAD (accoreconsole.exe) — без GUI и диалоговых окон
+$nativeExportScript = Join-Path $PSScriptRoot 'Invoke-NativeDwgPdfExport.ps1'
+if (Test-Path -LiteralPath $nativeExportScript) {
+  try {
+    . $nativeExportScript
+    $accore = Find-NativeAccoreConsole
+    if ($accore) {
+      $sessionGuid = [System.Guid]::NewGuid().ToString("N").Substring(0, 10)
+      $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) "FEng_dwg_native_$sessionGuid"
+      $targetPdf = if (-not [string]::IsNullOrWhiteSpace($OutputPath)) { $OutputPath } else { [System.IO.Path]::ChangeExtension($InputPath, ".pdf") }
+      $tempPdf = Join-Path $tempDir "native_export.pdf"
+      $r = Invoke-NativeDwgPdfExport -InputPath $InputPath -OutputPdf $tempPdf -WorkDir $tempDir -TimeoutSec 240
+      if ((Test-Path -LiteralPath $tempPdf) -and (Get-Item -LiteralPath $tempPdf).Length -gt 1024) {
+        $finalDestination = $targetPdf
+        try {
+          Copy-Item -LiteralPath $tempPdf -Destination $targetPdf -Force -ErrorAction Stop
+        } catch {
+          if (-not [string]::IsNullOrWhiteSpace($FallbackCachePath)) {
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $FallbackCachePath) | Out-Null
+            Copy-Item -LiteralPath $tempPdf -Destination $FallbackCachePath -Force
+            $finalDestination = $FallbackCachePath
+          }
+        }
+        Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        $res = @{
+          ok = $true
+          finalPath = $finalDestination
+          isLocalFolder = ($finalDestination -eq $targetPdf)
+          pageCount = 1
+          progId = "AutoCAD Core Console (native _.-EXPORT _PDF)"
+        }
+        Write-Output ($res | ConvertTo-Json -Compress)
+        exit 0
+      }
+    }
+  } catch {
+    # Если консоль не завершила экспорт, переходим к штатной печати через COM
+  }
+}
+
 if (-not ([System.Management.Automation.PSTypeName]'LauncherMessageFilter').Type) {
   Add-Type -TypeDefinition @"
 using System;
