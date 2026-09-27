@@ -40,7 +40,38 @@ EXCEL_XLS_CONVERT_SCRIPT = REPO_ROOT / "scripts" / "convert_xls_to_xlsx.ps1"
 DWG_RENDER_SCRIPT = REPO_ROOT / "scripts" / "render_dwg_model_space.ps1"
 DWG_SMART_RENDER_SCRIPT = REPO_ROOT / "scripts" / "render_dwg_smart.ps1"
 VERSION = "0.4.0-v3-pdf-render"
+APP_VERSION = "3.1.0"
+APP_BRANCH = "dvg-main"
 SKIP_DIR_NAMES = {".git", "__pycache__", "node_modules", ".venv", "venv"}
+
+
+def get_launcher_version_info() -> dict:
+    """Вернуть {version, branch} из app.shared.version_info или version.json.
+
+    Не падает при отсутствии файла: возвращает значения по умолчанию
+    для ветки dvg-main.
+    """
+    try:
+        from app.shared.version_info import get_version_payload
+
+        payload = get_version_payload()
+        if isinstance(payload, dict):
+            version = str(payload.get("version") or APP_VERSION)
+            branch = str(payload.get("git_branch") or payload.get("branch") or APP_BRANCH)
+            return {"version": version, "branch": branch}
+    except Exception:
+        pass
+    try:
+        manifest_path = REPO_ROOT / "version.json"
+        with manifest_path.open("r", encoding="utf-8") as manifest_file:
+            payload = json.load(manifest_file)
+        if isinstance(payload, dict):
+            version = str(payload.get("version") or APP_VERSION)
+            branch = str(payload.get("git_branch") or payload.get("branch") or APP_BRANCH)
+            return {"version": version, "branch": branch}
+    except Exception:
+        pass
+    return {"version": APP_VERSION, "branch": APP_BRANCH}
 DEFAULT_PDF_DPI = 300
 PDF_PAGE_TIMEOUT_SECONDS = 25
 PDF_DOCUMENT_TIMEOUT_SECONDS = 600
@@ -2377,6 +2408,21 @@ class LauncherHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if parsed.path == "/api/version":
+            info = get_launcher_version_info()
+            self.send_json(
+                HTTPStatus.OK,
+                {"status": "ok", "version": info["version"], "branch": info["branch"]},
+            )
+            return
+
+        if parsed.path == "/api/updates/check":
+            from app.updater import check_for_updates
+
+            res = check_for_updates()
+            self.send_json(HTTPStatus.OK, res)
+            return
+
         if parsed.path == "/api/config/apps":
             self.send_json(HTTPStatus.OK, load_native_apps_config())
             return
@@ -2903,6 +2949,24 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.OK, {"ok": True, "text": raw_text})
             except Exception as error:
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+            return
+
+        if parsed.path == "/api/updates/apply":
+            # Запуск скачивания и обновления в фоновом потоке, чтобы сразу вернуть ответ браузеру
+            import threading
+            from app.updater import check_for_updates, download_update_payload, apply_update_and_exit
+
+            def _worker():
+                try:
+                    info = check_for_updates()
+                    if info.get("has_update") and info.get("download_url"):
+                        zip_path = download_update_payload(info["download_url"], info.get("sha256", ""))
+                        apply_update_and_exit(zip_path)
+                except Exception as e:
+                    print(f"[Update Error] {e}")
+
+            threading.Thread(target=_worker, daemon=True).start()
+            self.send_json(HTTPStatus.OK, {"status": "updating", "message": "Загрузка обновления началась, лаунчер скоро перезапустится."})
             return
 
         self.send_json(HTTPStatus.NOT_FOUND, {"error": "Маршрут не найден"})

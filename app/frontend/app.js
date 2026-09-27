@@ -4316,6 +4316,52 @@ document.addEventListener("click", (event) => {
 
 setMode("objects");
 setViewerMode("standard");
+fetch('/api/version')
+  .then(r => r.json())
+  .then(data => {
+    const el = document.getElementById('app-version-badge');
+    if (el) el.textContent = 'v' + data.version;
+  })
+  .catch(() => {
+    const el = document.getElementById('app-version-badge');
+    if (el) el.textContent = 'v3.1.0';
+  });
+
+// Автообновление (Спринт 2): проверка через 3 секунды после загрузки.
+function showUpdateBanner(data) {
+  const badge = document.getElementById('app-version-badge');
+  if (!badge || document.getElementById('update-pill')) return;
+  const pill = document.createElement('button');
+  pill.type = 'button';
+  pill.id = 'update-pill';
+  pill.title = data.changelog || 'Доступно обновление лаунчера';
+  pill.textContent = 'Доступно обновление v' + data.latest_version + ' [Обновить]';
+  pill.style.cssText = 'margin-left:8px;padding:2px 12px;border-radius:999px;border:1px solid #93c5fd;background:#dbeafe;color:#1d4ed8;font-size:12px;cursor:pointer;white-space:nowrap;';
+  pill.addEventListener('click', () => {
+    pill.disabled = true;
+    pill.textContent = 'Загрузка обновления...';
+    fetch('/api/updates/apply', { method: 'POST' })
+      .then(r => r.json())
+      .then(() => {
+        showToast('Идет загрузка и установка обновления... Лаунчер перезапустится через несколько секунд.');
+      })
+      .catch(() => {
+        showToast('Идет загрузка и установка обновления... Лаунчер перезапустится через несколько секунд.');
+      });
+  });
+  badge.after(pill);
+}
+
+function checkUpdates() {
+  fetch('/api/updates/check')
+    .then(r => r.json())
+    .then(data => {
+      if (data && data.has_update) {
+        showUpdateBanner(data);
+      }
+    }).catch(() => {});
+}
+setTimeout(checkUpdates, 3000);
 loadObjectSummaries().catch((error) => {
   els.objectList.innerHTML = `<div class="empty-note">Ошибка загрузки списка: ${error.message}</div>`;
 });

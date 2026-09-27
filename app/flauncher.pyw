@@ -10,15 +10,62 @@ import atexit
 import ctypes
 from ctypes import wintypes
 import os
+import shutil
 import socket
 import subprocess
 import sys
 import time
 import urllib.request
+from pathlib import Path
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BACKEND = os.path.join(REPO_ROOT, "app", "backend", "server.py")
-ICON = os.path.join(REPO_ROOT, "app", "frontend", "assets", "flauncher.ico")
+if getattr(sys, 'frozen', False):
+    # Запущено из скомпилированного EXE (dist\FEngineeringLauncher\FEngineeringLauncher.exe)
+    # Корнем лаунчера является папка с самим EXE или папка на уровень выше
+    REPO_ROOT = str(Path(sys.executable).resolve().parent)
+else:
+    # Запущено обычным python app/flauncher.pyw
+    REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+
+
+def _resource_path(*relative: str) -> str:
+    """Найти bundled-ресурс: сначала от REPO_ROOT, затем из sys._MEIPASS.
+
+    PyInstaller 6 в режиме onedir кладёт --add-data в подпапку _internal,
+    на которую указывает sys._MEIPASS. В обычном режиме _MEIPASS нет
+    и всё строго от REPO_ROOT.
+    """
+    candidate = os.path.join(REPO_ROOT, *relative)
+    if os.path.exists(candidate):
+        return candidate
+    meipass = getattr(sys, '_MEIPASS', '')
+    if meipass:
+        bundled = os.path.join(str(meipass), *relative)
+        if os.path.exists(bundled):
+            return bundled
+    return candidate
+
+
+def _backend_python() -> str:
+    """Интерпретатор для запуска backend-сервера (server.py).
+
+    Приоритет: встроенный runtime/python/pythonw.exe, затем (только
+    в frozen-режиме без embedded runtime) pythonw/python из PATH.
+    В обычном режиме — текущий интерпретатор. Никогда не возвращаем
+    сам EXE: иначе frozen-процесс породил бы каскад копий GUI.
+    """
+    if os.path.exists(EMBEDDED_PYTHON):
+        return EMBEDDED_PYTHON
+    if getattr(sys, 'frozen', False):
+        for candidate in ("pythonw.exe", "python.exe"):
+            found = shutil.which(candidate)
+            if found:
+                return found
+    return sys.executable
+
+
+BACKEND = _resource_path("app", "backend", "server.py")
+ICON = _resource_path("app", "frontend", "assets", "flauncher.ico")
+EMBEDDED_PYTHON = os.path.join(REPO_ROOT, "runtime", "python", "pythonw.exe")
 TITLE = "F-Engineering Launcher"
 GUI_MUTEX_PORT = 8799
 LOGS_DIR = os.path.join(REPO_ROOT, "runtime", "logs")
@@ -242,8 +289,10 @@ def find_or_start_server() -> tuple[int, subprocess.Popen | None]:
     if os.name == "nt":
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
-    # Запускаем server.py
-    python_exe = sys.executable
+    # Запускаем server.py: встроенный runtime/python/pythonw.exe в приоритете,
+    # иначе — текущий интерпретатор (в frozen — pythonw/python из PATH).
+    # Консоль сервера не всплывает (CREATE_NO_WINDOW).
+    python_exe = _backend_python()
     server_proc = subprocess.Popen(
         [python_exe, BACKEND, "--port", str(target_port)],
         cwd=REPO_ROOT,

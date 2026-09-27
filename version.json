@@ -1,0 +1,7 @@
+{
+  "version": "3.1.0",
+  "build_date": "2026-09-27",
+  "git_branch": "dvg-main",
+  "runtime_version": "1.0",
+  "update_manifest_url": "https://raw.githubusercontent.com/f-engineering-spb/f-engineering-launcher/dvg-main/version.json"
+}

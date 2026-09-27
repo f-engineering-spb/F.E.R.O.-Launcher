@@ -7,6 +7,7 @@ venv/
 # Node / frontend tooling
 node_modules/
 dist/
+dist_setup/
 build/
 
 # Local runtime data
