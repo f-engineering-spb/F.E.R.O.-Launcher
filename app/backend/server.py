@@ -2989,9 +2989,14 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 # ВАЖНО: без hidden_process_kwargs() — флаг STARTF_USESHOWWINDOW
                 # с wShowWindow=0 прячет модальное окно FolderBrowserDialog.
                 # Диалог выбора папки обязан открываться поверх лаунчера.
+                creation_flags = 0
+                if os.name == "nt":
+                    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
                 proc = subprocess.run(
                     [
                         "powershell.exe",
+                        "-WindowStyle",
+                        "Hidden",
                         "-STA",
                         "-NoProfile",
                         "-ExecutionPolicy",
@@ -3002,6 +3007,7 @@ class LauncherHandler(BaseHTTPRequestHandler):
                     capture_output=True,
                     text=False,
                     timeout=120,
+                    creationflags=creation_flags,
                 )
                 selected = decode_folder_dialog_output(proc.stdout)
                 if selected:
