@@ -4581,14 +4581,18 @@ async function browseExeForSetting(inputId) {
   const input = document.getElementById(inputId);
   if (!input) return;
   try {
+    startProgress("Выбор программы", "Открывается диалог Windows...");
     const res = await fetch("/api/choose-exe");
     const data = await res.json();
+    finishProgress("");
     if (data.path) {
       input.value = data.path;
+      showToast("Выбран файл: " + data.path);
     } else if (data.error) {
       showOperationError(new Error(data.error));
     }
   } catch (err) {
+    finishProgress("");
     showOperationError(err);
   }
 }

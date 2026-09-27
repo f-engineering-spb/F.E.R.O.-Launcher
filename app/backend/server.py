@@ -1261,6 +1261,7 @@ def render_dwg_model(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
         return document
 
     # 2. Level 1: Моментальное извлечение встроенного растра из заголовка DWG (< 1 мс)
+    # Показывается внутри лаунчера ТОЛЬКО как картинка (без запуска AutoCAD/TrueView)
     cached_png = target_dir / "page-1.png"
     if not (cached_png.exists() and cached_png.stat().st_size > 0):
         raster_bytes = extract_dwg_embedded_raster(path)
@@ -1268,8 +1269,11 @@ def render_dwg_model(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
             cached_png.write_bytes(raster_bytes)
 
     if cached_png.exists() and cached_png.stat().st_size > 0:
-        # Запускаем фоновый рендеринг через AutoCAD COM в отдельном потоке (non-blocking)
-        trigger_bg_dwg_render(path, dpi)
+        # ВНИМАНИЕ: Не запускаем фоновый рендеринг AutoCAD / TrueView самовольно!
+        # Запуск CAD разрешён только если AutoCAD явно настроен в «Параметрах».
+        cad_configured = get_configured_exe_for_path(path)
+        if cad_configured and Path(cad_configured).is_file():
+            trigger_bg_dwg_render(path, dpi)
         return {
             "name": path.name,
             "path": str(path),
@@ -1298,7 +1302,45 @@ def render_dwg_model(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
             "previewMode": "cad-smart-layouts",
         }
 
-    # 3. Fallback: если встроенного превью не обнаружено, синхронный рендеринг
+    # 3. Fallback: если встроенного превью не обнаружено:
+    # Запуск векторного рендера разрешён ТОЛЬКО если путь к CAD указан в «Параметрах»
+    cad_configured = get_configured_exe_for_path(path)
+    if not cad_configured or not Path(cad_configured).is_file():
+        # Отдаем заглушку без вызова TrueView/AutoCAD
+        try:
+            from app.backend.dwg_engine import _generate_placeholder_png
+        except ImportError:
+            from dwg_engine import _generate_placeholder_png
+        placeholder_bytes = _generate_placeholder_png(path.name, "DWG Preview (укажите CAD в Параметрах)")
+        cached_png.write_bytes(placeholder_bytes)
+        return {
+            "name": path.name,
+            "path": str(path),
+            "sourcePath": str(path),
+            "sourceName": path.name,
+            "sourceType": "DWG",
+            "dpi": dpi,
+            "pages": 1,
+            "renderedPages": 1,
+            "cacheKey": key,
+            "cacheHit": True,
+            "cacheHitPages": 1,
+            "newRenderedPages": 0,
+            "errors": [],
+            "items": [
+                {
+                    "page": 1,
+                    "name": f"{path.name} · заглушка",
+                    "url": f"/cache/dwg/{key}/page-1.png",
+                    "bytes": cached_png.stat().st_size,
+                }
+            ],
+            "status": "ok",
+            "convertedPdfPath": "",
+            "convertCacheHit": False,
+            "previewMode": "cad-smart-layouts",
+        }
+
     pdf_path, convert_cache_hit = dwg_to_model_pdf(path)
     document = render_pdf(pdf_path, dpi=dpi, page_timeout_seconds=DWG_MODEL_PAGE_TIMEOUT_SECONDS)
     document["name"] = path.name
