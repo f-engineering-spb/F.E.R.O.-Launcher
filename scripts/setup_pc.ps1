@@ -178,26 +178,63 @@ New-Item -ItemType Directory -Force -Path (Join-Path $repoRoot "runtime\cache") 
 New-Item -ItemType Directory -Force -Path (Join-Path $repoRoot "runtime\logs") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $repoRoot "runtime\manifests") | Out-Null
 
+Write-Host "[6/6] Создание ярлыков (Рабочий стол и меню Пуск)..." -NoNewline
 try {
-    $desktopPath = [Environment]::GetFolderPath("Desktop")
-    $shortcutPath = Join-Path $desktopPath "F-Engineering Launcher.lnk"
-    
     $wsh = New-Object -ComObject WScript.Shell
-    $shortcut = $wsh.CreateShortcut($shortcutPath)
-    $shortcut.TargetPath = $startCmd
-    $shortcut.WorkingDirectory = $repoRoot
-    $shortcut.Description = "F-Engineering Launcher v3"
+
+    # 1. Рабочий стол
+    $desktopPath = [Environment]::GetFolderPath("Desktop")
+    $desktopShortcut = $wsh.CreateShortcut((Join-Path $desktopPath "F-Engineering Launcher.lnk"))
+    $desktopShortcut.TargetPath = $startCmd
+    $desktopShortcut.WorkingDirectory = $repoRoot
+    $desktopShortcut.Description = "F-Engineering Launcher v3"
     if (Test-Path -LiteralPath $icoPath) {
-        $shortcut.IconLocation = "$icoPath, 0"
+        $desktopShortcut.IconLocation = "$icoPath, 0"
     }
-    $shortcut.Save()
+    $desktopShortcut.Save()
+
+    # 2. Главное меню Пуск (в корне списка программ Programs)
+    $startMenuPrograms = [Environment]::GetFolderPath("Programs")
+    if ($startMenuPrograms -and (Test-Path -LiteralPath $startMenuPrograms)) {
+        $startMenuShortcut = $wsh.CreateShortcut((Join-Path $startMenuPrograms "F-Engineering Launcher.lnk"))
+        $startMenuShortcut.TargetPath = $startCmd
+        $startMenuShortcut.WorkingDirectory = $repoRoot
+        $startMenuShortcut.Description = "F-Engineering Launcher v3"
+        if (Test-Path -LiteralPath $icoPath) {
+            $startMenuShortcut.IconLocation = "$icoPath, 0"
+        }
+        $startMenuShortcut.Save()
+    }
+
+    # 3. Список недавних / последних установленных (Recent / Start Menu Root)
+    $startMenuRoot = [Environment]::GetFolderPath("StartMenu")
+    if ($startMenuRoot -and (Test-Path -LiteralPath $startMenuRoot)) {
+        $rootShortcut = $wsh.CreateShortcut((Join-Path $startMenuRoot "F-Engineering Launcher.lnk"))
+        $rootShortcut.TargetPath = $startCmd
+        $rootShortcut.WorkingDirectory = $repoRoot
+        $rootShortcut.Description = "F-Engineering Launcher v3"
+        if (Test-Path -LiteralPath $icoPath) {
+            $rootShortcut.IconLocation = "$icoPath, 0"
+        }
+        $rootShortcut.Save()
+    }
+
+    # Регистрация в списке последних установленных приложений Windows (Recent)
+    $recentPath = [Environment]::GetFolderPath("Recent")
+    if ($recentPath -and (Test-Path -LiteralPath $recentPath)) {
+        $recentShortcut = $wsh.CreateShortcut((Join-Path $recentPath "F-Engineering Launcher.lnk"))
+        $recentShortcut.TargetPath = $startCmd
+        $recentShortcut.WorkingDirectory = $repoRoot
+        $recentShortcut.Save()
+    }
+
     Write-Host " [OK]" -ForegroundColor Green
-    Write-Host "      Ярлык создан на Рабочем столе: 'F-Engineering Launcher'" -ForegroundColor Cyan
+    Write-Host "      ✓ Ярлык создан на Рабочем столе: 'F-Engineering Launcher'" -ForegroundColor Cyan
+    Write-Host "      ✓ Ярлык зарегистрирован в меню Пуск (вверху и в списке последних установленных)" -ForegroundColor Cyan
 } catch {
     Write-Host " [ВНИМАНИЕ]" -ForegroundColor Yellow
-    Write-Host "      Не удалось создать ярлык на Рабочем столе: $($_.Exception.Message)" -ForegroundColor Gray
+    Write-Host "      Не удалось создать некоторые ярлыки: $($_.Exception.Message)" -ForegroundColor Gray
 }
-
 # ----------------------------------------------------------------------
 # Итоги и запуск
 # ----------------------------------------------------------------------
