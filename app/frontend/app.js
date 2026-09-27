@@ -615,6 +615,14 @@ async function excludeSelectedObject() {
   finishProgress("Объект исключён");
 }
 
+function getCachedFlatNodes() {
+  if (!state.currentManifest?.tree) return [];
+  if (!state.currentManifest._flatNodes) {
+    state.currentManifest._flatNodes = getCachedFlatNodes();
+  }
+  return state.currentManifest._flatNodes;
+}
+
 function flattenTree(node, result = []) {
   result.push(node);
   for (const child of node.children || []) flattenTree(child, result);
@@ -896,27 +904,40 @@ function findPdfPairForDwg(dwgNode, pdfIndex, options = {}) {
   // (гигантский объект), возвращаем лучшее из найденного или null:
   // тогда файл пойдёт по честному пути DWG_MODEL, а не повесит окно.
   let best = null;
+  const budgetUntil = Number.isFinite(pairFuzzyBudgetUntil) ? pairFuzzyBudgetUntil : Date.now() + 100;
   for (let i = 0; i < list.length; i++) {
-    if ((i & 63) === 0 && Date.now() > pairFuzzyBudgetUntil) break;
+    if ((i & 63) === 0 && Date.now() > budgetUntil) break;
     const comparison = comparePairFingerprints(dwgFingerprint, list[i].fingerprint);
     if (comparison && (!best || comparison.score > best.score)) best = { node: list[i].node, ...comparison };
   }
   return best;
 }
 
+let nodeMatchCache = null;
+
 function nodeMatches(node) {
+  if (!node) return false;
+  if (nodeMatchCache && nodeMatchCache.has(node)) {
+    return nodeMatchCache.get(node);
+  }
   const query = els.treeSearch.value.trim().toLocaleLowerCase("ru");
   const hasFormatFilter = state.activeFilters.size > 0;
   const value = `${node.name} ${node.extension || ""} ${node.path || ""}`.toLocaleLowerCase("ru");
   const searchOk = !query || value.includes(query);
   const formatOk = !hasFormatFilter || node.type === "folder" || state.activeFilters.has(node.extension);
   if (node.type === "file") {
-    if (state.diffFilter && !state.diffStatus.has(node.path)) return false;
-    return searchOk && formatOk;
+    if (state.diffFilter && !state.diffStatus.has(node.path)) {
+      if (nodeMatchCache) nodeMatchCache.set(node, false);
+      return false;
+    }
+    const res = searchOk && formatOk;
+    if (nodeMatchCache) nodeMatchCache.set(node, res);
+    return res;
   }
   const childMatch = (node.children || []).some((child) => nodeMatches(child));
-  if (state.diffFilter) return childMatch;
-  return childMatch || searchOk;
+  const res = state.diffFilter ? childMatch : (childMatch || searchOk);
+  if (nodeMatchCache) nodeMatchCache.set(node, res);
+  return res;
 }
 
 function countDiffDescendants(node, result = { added: 0, changed: 0, removed: 0 }) {
@@ -1218,10 +1239,9 @@ async function previewFileDirectly(node, options = {}) {
     };
   } else if (ext === "DWG") {
     if (!state.pairless && !state.pdfPairIndex && state.currentManifest?.tree) {
-      const allNodes = flattenTree(state.currentManifest.tree, []);
-      state.pdfPairIndex = buildPdfPairIndex(allNodes);
+      state.pdfPairIndex = buildPdfPairIndex(getCachedFlatNodes());
     }
-    const pair = findPdfPairForDwg(node, state.pdfPairIndex || new Map());
+    const pair = findPdfPairForDwg(node, state.pdfPairIndex || new Map(), { fuzzy: false });
     if (pair) {
       item = {
         ...pair.node,
@@ -1230,7 +1250,8 @@ async function previewFileDirectly(node, options = {}) {
     } else {
       item = {
         ...node,
-        previewType: "DWG_MODEL",
+        previewType: "IMAGE",
+        url: `/api/dwg/thumbnail?path=${encodeURIComponent(node.path)}`,
         previewFor: { type: "DWG", name: node.name, path: node.path },
       };
     }
@@ -1521,9 +1542,9 @@ function getPdfPairForDwgCached(node) {
   if (pdfPairCache.has(node.path)) return pdfPairCache.get(node.path);
   if (state.pairless) return null;
   if (!state.pdfPairIndex && state.currentManifest?.tree) {
-    state.pdfPairIndex = buildPdfPairIndex(flattenTree(state.currentManifest.tree, []));
+    state.pdfPairIndex = buildPdfPairIndex(getCachedFlatNodes());
   }
-  const pair = findPdfPairForDwg(node, state.pdfPairIndex);
+  const pair = findPdfPairForDwg(node, state.pdfPairIndex, { fuzzy: false });
   pdfPairCache.set(node.path, pair);
   return pair;
 }
@@ -1795,7 +1816,7 @@ function renderFormats() {
       state.activeFilters.add(ext);
       state.selectedPaths.clear();
       if (state.currentManifest?.tree) {
-        flattenTree(state.currentManifest.tree, [])
+        getCachedFlatNodes()
           .filter((node) => node.type === "file" && node.extension === ext)
           .forEach((node) => state.selectedPaths.add(node.path));
       }
@@ -1827,24 +1848,26 @@ function updateViewerBanner(title) {
 }
 
 function renderTree() {
-  els.objectTree.replaceChildren();
   state.visibleRows = [];
   if (!state.currentManifest?.tree) {
+    els.objectTree.replaceChildren();
     const empty = document.createElement("div");
     empty.className = "empty-note";
     empty.textContent = "Дерево ещё не открыто.";
     els.objectTree.append(empty);
     return;
   }
+  nodeMatchCache = new Map();
   if (!state.pairless && !state.pdfPairIndex) {
-    state.pdfPairIndex = buildPdfPairIndex(flattenTree(state.currentManifest.tree, []));
+    state.pdfPairIndex = buildPdfPairIndex(getCachedFlatNodes());
   }
-  renderTreeNode(state.currentManifest.tree, els.objectTree);
+  const fragment = document.createDocumentFragment();
+  renderTreeNode(state.currentManifest.tree, fragment);
   if (state.diffRemovedNodes.length && !state.diffFilter) {
     const removedTitle = document.createElement("div");
     removedTitle.className = "diff-removed-title";
     removedTitle.textContent = "Удалённые файлы";
-    els.objectTree.append(removedTitle);
+    fragment.append(removedTitle);
     state.diffRemovedNodes.forEach((node) => {
       const row = document.createElement("div");
       row.className = "tree-row file diff-removed-row";
@@ -1888,7 +1911,7 @@ function renderTree() {
           ext: node.extension || "",
         });
       });
-      els.objectTree.append(row);
+      fragment.append(row);
       state.visibleRows.push(node);
     });
   }
@@ -1896,8 +1919,11 @@ function renderTree() {
     const empty = document.createElement("div");
     empty.className = "empty-note";
     empty.textContent = "Поиск или фильтр ничего не нашли.";
-    els.objectTree.append(empty);
+    fragment.append(empty);
   }
+  els.objectTree.replaceChildren(fragment);
+  nodeMatchCache = null;
+  updateTreeSelectionHighlight();
 }
 
 async function openSelectedObject() {
@@ -1928,7 +1954,7 @@ async function openSelectedObject() {
   const _pdfCount = Number(_pairExts.PDF ?? _pairExts.pdf ?? 0);
   state.pairless = _pdfCount === 0;
   const _piT0 = performance.now();
-  state.pdfPairIndex = state.pairless ? null : buildPdfPairIndex(flattenTree(manifest.tree, []));
+  state.pdfPairIndex = state.pairless ? null : buildPdfPairIndex(getCachedFlatNodes());
   beaconPerf("pair-index", performance.now() - _piT0, `files=${(manifest.statistics || {}).files || 0} pdf=${_pdfCount} pairless=${state.pairless}`);
   setMode("tree");
   updateViewerBanner(manifest.name || object.name);
@@ -1943,7 +1969,7 @@ async function openSelectedObject() {
 
 function collectPreviewFilesForDisplay() {
   if (!state.currentManifest?.tree) return [];
-  const allNodes = flattenTree(state.currentManifest.tree, []);
+  const allNodes = getCachedFlatNodes();
   const selectedNodes = allNodes.filter((node) => state.selectedPaths.has(node.path));
   // Индекс один на объект (построен при открытии), не пересобираем при каждом показе.
   // Pairless-объекты (без PDF) индекс не строят вовсе.
@@ -1985,7 +2011,7 @@ function collectPreviewFilesForDisplay() {
       });
     } else if (ext === "DWG") {
       // Массовый показ: только точные пары (папка не важна — пара обычно
-      // в соседней папке PDF). Нечёткий поиск оставлен одиночным файлам.
+      // в соседней папке PDF). При отсутствии пары используем мгновенный thumbnail.
       const pair = findPdfPairForDwg(node, pdfIndex, { fuzzy: false });
       if (pair) {
         result.push({
@@ -2000,7 +2026,8 @@ function collectPreviewFilesForDisplay() {
       } else {
         result.push({
           ...node,
-          previewType: "DWG_MODEL",
+          previewType: "IMAGE",
+          url: `/api/dwg/thumbnail?path=${encodeURIComponent(node.path)}`,
           previewFor: {
             type: "DWG",
             name: node.name,
