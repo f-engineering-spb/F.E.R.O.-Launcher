@@ -3249,11 +3249,6 @@ class LauncherHandler(BaseHTTPRequestHandler):
             self.send_json(HTTPStatus.OK, {"ok": True, "detected": detected})
             return
 
-        if parsed.path in ("/api/config/apps/autodetect", "/api/config/apps/detect"):
-            detected = detect_all_windows_default_apps()
-            self.send_json(HTTPStatus.OK, {"ok": True, "detected": detected})
-            return
-
         if parsed.path == "/api/config/apps":
             self.send_json(HTTPStatus.OK, load_native_apps_config())
             return
@@ -3464,6 +3459,11 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 )
             except Exception as error:
                 self.send_json(HTTPStatus.OK, {"path": "", "error": f"Системный диалог выбора папки недоступен: {error}"})
+            return
+
+        if parsed.path in ("/api/config/apps/autodetect", "/api/config/apps/detect"):
+            detected = detect_all_windows_default_apps()
+            self.send_json(HTTPStatus.OK, {"ok": True, "detected": detected})
             return
 
         if parsed.path == "/api/config/apps":
