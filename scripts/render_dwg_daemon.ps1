@@ -1,4 +1,4 @@
-﻿param(
+param(
   [Parameter(Mandatory = $true)][string]$JobDir,
   [Parameter(Mandatory = $false)][string]$ReadyFile = "",
   [Parameter(Mandatory = $false)][string]$LogFile = "",
@@ -67,7 +67,15 @@ public class LauncherMessageFilter : IOleMessageFilter
 [LauncherMessageFilter]::Register()
 
 $comProgIds = @(
+  "AutoCAD.Application.25",
+  "AutoCAD.Application.24.3",
+  "AutoCAD.Application.24.2",
+  "AutoCAD.Application.24.1",
+  "AutoCAD.Application.24.0",
   "AutoCAD.Application.24",
+  "AutoCAD.Application.23.1",
+  "AutoCAD.Application.23",
+  "AutoCAD.Application.22",
   "AutoCAD.Application"
 )
 
@@ -451,8 +459,24 @@ try {
   try { [LauncherMessageFilter]::Revoke() } catch {}
   if ($script:cadApp) {
     try { $script:cadApp.Quit() } catch {}
+    try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($script:cadApp) | Out-Null } catch {}
   }
   [System.GC]::Collect()
   [System.GC]::WaitForPendingFinalizers()
+
+  if ($script:ourAcadPid -and $script:ourAcadPid -gt 0) {
+    $deadline = (Get-Date).AddSeconds(3)
+    while ((Get-Date) -lt $deadline) {
+      $p = Get-Process -Id $script:ourAcadPid -ErrorAction SilentlyContinue
+      if (-not $p -or $p.HasExited) { break }
+      Start-Sleep -Milliseconds 200
+    }
+    try {
+      $p = Get-Process -Id $script:ourAcadPid -ErrorAction SilentlyContinue
+      if ($p -and -not $p.HasExited) {
+        Stop-Process -Id $script:ourAcadPid -Force -ErrorAction SilentlyContinue
+      }
+    } catch {}
+  }
 }
 Write-DaemonLog "stopped"

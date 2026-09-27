@@ -1,4 +1,4 @@
-﻿param(
+param(
   [Parameter(Mandatory = $true)][string]$InputPath,
   [Parameter(Mandatory = $false)][string]$OutputPath = "",
   [Parameter(Mandatory = $false)][string]$FallbackCachePath = "",
@@ -62,7 +62,15 @@ public class LauncherMessageFilter : IOleMessageFilter
 
 # Подключение к CAD через COM-интерфейс
 $comProgIds = @(
+  "AutoCAD.Application.25",
+  "AutoCAD.Application.24.3",
+  "AutoCAD.Application.24.2",
+  "AutoCAD.Application.24.1",
+  "AutoCAD.Application.24.0",
   "AutoCAD.Application.24",
+  "AutoCAD.Application.23.1",
+  "AutoCAD.Application.23",
+  "AutoCAD.Application.22",
   "AutoCAD.Application"
 )
 
@@ -81,6 +89,24 @@ foreach ($progId in $comProgIds) {
 if (-not $app) {
   throw "Не удалось подключиться к AutoCAD через COM (проверены: $($comProgIds -join ', '))."
 }
+
+if (-not ([System.Management.Automation.PSTypeName]'LauncherWin32').Type) {
+  Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class LauncherWin32 {
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+}
+"@
+}
+
+$cadPid = 0
+try {
+  $hwnd = [IntPtr]::new([long]$app.HWND)
+  [uint32]$pidOut = 0
+  [void][LauncherWin32]::GetWindowThreadProcessId($hwnd, [ref]$pidOut)
+  if ($pidOut -gt 0) { $cadPid = [int]$pidOut }
+} catch {}
 
 $app.Visible = $false
 $document = $null
@@ -274,12 +300,29 @@ except ImportError:
   try { [LauncherMessageFilter]::Revoke() } catch {}
   if ($document) {
     try { $document.Close($false) } catch {}
+    try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($document) | Out-Null } catch {}
   }
   if ($app) {
     try { $app.Quit() } catch {}
+    try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($app) | Out-Null } catch {}
   }
   [System.GC]::Collect()
   [System.GC]::WaitForPendingFinalizers()
+
+  if ($cadPid -and $cadPid -gt 0) {
+    $deadline = (Get-Date).AddSeconds(3)
+    while ((Get-Date) -lt $deadline) {
+      $p = Get-Process -Id $cadPid -ErrorAction SilentlyContinue
+      if (-not $p -or $p.HasExited) { break }
+      Start-Sleep -Milliseconds 200
+    }
+    try {
+      $p = Get-Process -Id $cadPid -ErrorAction SilentlyContinue
+      if ($p -and -not $p.HasExited) {
+        Stop-Process -Id $cadPid -Force -ErrorAction SilentlyContinue
+      }
+    } catch {}
+  }
 
   if (Test-Path -LiteralPath $tempDir) {
     Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue

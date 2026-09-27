@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import hashlib
 import html
+import io
 import json
 import mimetypes
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import threading
@@ -293,11 +296,80 @@ def manifest_path(object_id: str) -> Path:
     return MANIFESTS_DIR / f"{object_id}.json"
 
 
+def validate_and_filter_tree(node: dict) -> dict:
+    if not isinstance(node, dict):
+        return node
+    node_path = node.get("path") or ""
+    if not os.path.exists(node_path):
+        node["is_missing"] = True
+        node["error"] = "Путь недоступен на диске"
+        if node.get("type") == "folder":
+            node["children"] = []
+        return node
+
+    if node.get("type") == "folder":
+        valid_children = []
+        for child in node.get("children", []):
+            if not isinstance(child, dict):
+                continue
+            c_path = child.get("path") or ""
+            if not os.path.exists(c_path):
+                # Файл физически удален или диск недоступен: исключаем мертвую запись
+                continue
+            if child.get("type") == "folder":
+                valid_children.append(validate_and_filter_tree(child))
+            else:
+                valid_children.append(child)
+        node["children"] = valid_children
+        return node
+    return node
+
+
+def calculate_tree_statistics(tree: dict) -> dict:
+    counts: dict[str, int] = {}
+    folder_count = 0
+    file_count = 0
+
+    def walk(n: dict) -> None:
+        nonlocal folder_count, file_count
+        if not isinstance(n, dict):
+            return
+        if n.get("type") == "folder":
+            folder_count += 1
+            for child in n.get("children", []):
+                walk(child)
+        elif n.get("type") == "file":
+            file_count += 1
+            ext = (n.get("extension") or file_extension(Path(n.get("path", "")))).upper()
+            counts[ext] = counts.get(ext, 0) + 1
+
+    walk(tree)
+    return {
+        "folders": folder_count,
+        "files": file_count,
+        "extensions": counts,
+    }
+
+
 def load_manifest(object_id: str) -> dict | None:
     path = manifest_path(object_id)
     if not path.exists():
         return None
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    root_path = manifest.get("rootPath", "")
+    if not root_path or not os.path.exists(root_path):
+        return None
+
+    tree = manifest.get("tree")
+    if tree:
+        manifest["tree"] = validate_and_filter_tree(tree)
+        manifest["statistics"] = calculate_tree_statistics(manifest["tree"])
+
+    return manifest
 
 
 def manifest_summary(manifest: dict) -> dict:
@@ -316,6 +388,14 @@ def list_object_summaries() -> list[dict]:
     for path in MANIFESTS_DIR.glob("*.json"):
         try:
             manifest = json.loads(path.read_text(encoding="utf-8"))
+            root_path = manifest.get("rootPath", "")
+            # Исключаем мертвые призрачные записи с несуществующими корнями (отключенные диски, удаленные папки)
+            if not root_path or not os.path.exists(root_path):
+                continue
+            tree = manifest.get("tree")
+            if tree:
+                validated_tree = validate_and_filter_tree(tree)
+                manifest["statistics"] = calculate_tree_statistics(validated_tree)
             manifests.append(manifest_summary(manifest))
         except (OSError, json.JSONDecodeError):
             continue
@@ -452,6 +532,37 @@ def hidden_process_kwargs() -> dict:
         return {}
 
 
+def decode_folder_dialog_output(raw: bytes | None) -> str:
+    """Последняя непустая строка stdout диалога выбора папки -> путь.
+
+    Декодируем терпимо: сначала UTF-8 (скрипт выставляет
+    [Console]::OutputEncoding в UTF-8 без BOM), затем OEM/ANSI консоли,
+    чтобы кириллические пути не падали с UnicodeDecodeError
+    (было: errors="strict" -> тихая ошибка выбора папки).
+    Из строк выбираем последнюю существующую на диске: в stdout могут
+    попасть предупреждения PowerShell, а путь скрипт пишет последним.
+    """
+    if not raw:
+        return ""
+    text: str | None = None
+    for encoding in ("utf-8", "cp866", "cp1251"):
+        try:
+            text = raw.decode(encoding)
+            break
+        except (UnicodeDecodeError, LookupError):
+            continue
+    if text is None:
+        text = raw.decode("utf-8", errors="replace")
+    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+    for line in reversed(lines):
+        try:
+            if Path(line).exists():
+                return line
+        except (OSError, ValueError):
+            continue
+    return lines[-1] if lines else ""
+
+
 def run_poppler(args: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
     process = subprocess.Popen(
         args,
@@ -576,6 +687,24 @@ def word_to_pdf(path: Path) -> tuple[Path, bool]:
 
 
 def render_word(path: Path, dpi: int = DEFAULT_PDF_DPI, first_page_only: bool = False) -> dict:
+    if not path.exists():
+        return {
+            "name": path.name,
+            "path": str(path),
+            "sourcePath": str(path),
+            "sourceName": path.name,
+            "sourceType": file_extension(path),
+            "dpi": dpi,
+            "pages": 0,
+            "renderedPages": 0,
+            "cacheKey": "",
+            "cacheHit": False,
+            "cacheHitPages": 0,
+            "newRenderedPages": 0,
+            "is_missing": True,
+            "errors": [{"error": f"Документ не найден на диске: {path.name}", "is_missing": True}],
+            "items": [],
+        }
     pdf_path, convert_cache_hit = word_to_pdf(path)
     document = render_pdf(pdf_path, dpi=dpi, first_page_only=first_page_only)
     document["sourcePath"] = str(path)
@@ -892,36 +1021,53 @@ def dwg_to_model_pdf(path: Path) -> tuple[Path, bool]:
             pass
 
     script_to_run = DWG_SMART_RENDER_SCRIPT if DWG_SMART_RENDER_SCRIPT.exists() else DWG_RENDER_SCRIPT
-    process = dwg_convert_process(
-        path=path,
-        paired_pdf=paired_pdf,
-        fallback_pdf=fallback_pdf,
-        script_to_run=script_to_run,
-    )
-    if process.returncode != 0:
-        message = process.stderr.strip() or process.stdout.strip() or "CAD-система (AutoCAD) не смогла создать PDF для чертежа"
-        raise RuntimeError(message)
-
     final_pdf = None
-    if paired_pdf.exists() and paired_pdf.stat().st_size > 1024:
-        final_pdf = paired_pdf
-    elif fallback_pdf.exists() and fallback_pdf.stat().st_size > 1024:
-        final_pdf = fallback_pdf
-    else:
-        for line in reversed((process.stdout or "").splitlines()):
-            line = line.strip()
-            if line.startswith("{") and line.endswith("}"):
-                try:
-                    data = json.loads(line)
-                    cand = Path(data.get("finalPath", ""))
-                    if cand.exists() and cand.stat().st_size > 1024:
-                        final_pdf = cand
-                        break
-                except Exception:
-                    pass
+    try:
+        process = dwg_convert_process(
+            path=path,
+            paired_pdf=paired_pdf,
+            fallback_pdf=fallback_pdf,
+            script_to_run=script_to_run,
+        )
+        if process.returncode != 0:
+            message = process.stderr.strip() or process.stdout.strip() or "CAD-система (AutoCAD) не смогла создать PDF для чертежа"
+            raise RuntimeError(message)
 
-    if not final_pdf or not final_pdf.exists() or final_pdf.stat().st_size <= 1024:
-        raise RuntimeError("CAD-система (AutoCAD) не создала PDF-файл для чертежа")
+        if paired_pdf.exists() and paired_pdf.stat().st_size > 1024:
+            final_pdf = paired_pdf
+        elif fallback_pdf.exists() and fallback_pdf.stat().st_size > 1024:
+            final_pdf = fallback_pdf
+        else:
+            for line in reversed((process.stdout or "").splitlines()):
+                line = line.strip()
+                if line.startswith("{") and line.endswith("}"):
+                    try:
+                        data = json.loads(line)
+                        cand = Path(data.get("finalPath", ""))
+                        if cand.exists() and cand.stat().st_size > 1024:
+                            final_pdf = cand
+                            break
+                    except Exception:
+                        pass
+
+        if not final_pdf or not final_pdf.exists() or final_pdf.stat().st_size <= 1024:
+            raise RuntimeError("CAD-система (AutoCAD) не создала PDF-файл для чертежа")
+    except Exception as cad_err:
+        try:
+            from app.backend.dwg_engine import extract_raw_thumbnail_from_dwg, _generate_placeholder_png
+            thumb = extract_raw_thumbnail_from_dwg(path)
+            img_bytes = thumb[0] if thumb else _generate_placeholder_png(path.name, "Model")
+
+            # Конвертируем PNG превью чертежа в PDF через fitz (PyMuPDF)
+            import fitz
+            img_doc = fitz.open(stream=img_bytes, filetype="png")
+            pdf_bytes = img_doc.convert_to_pdf()
+            img_doc.close()
+
+            fallback_pdf.write_bytes(pdf_bytes)
+            final_pdf = fallback_pdf
+        except Exception as fallback_err:
+            raise RuntimeError(f"Сбой рендера DWG: {cad_err} (фолбэк: {fallback_err})")
 
     if final_pdf == fallback_pdf:
         manifest_path.write_text(
@@ -944,7 +1090,207 @@ def dwg_to_model_pdf(path: Path) -> tuple[Path, bool]:
     return final_pdf, False
 
 
+_DWG_BG_LOCK = threading.Lock()
+_DWG_BG_ACTIVE: set[str] = set()
+
+
+def extract_dwg_embedded_raster(path: Path) -> bytes | None:
+    """Извлекает встроенный превью-растр (PNG или BMP) из бинарного заголовка DWG за доли миллисекунды."""
+    try:
+        with open(path, "rb") as f:
+            header = f.read(1024)
+            if len(header) < 0x20:
+                return None
+            sentinel = b"\x1f\x25\x6d\x07\xd4\x36\x28\x28\x9d\x57\xca\x3f\x9d\x44\x10\x2b"
+            sentinel_pos = -1
+            if len(header) >= 0x11:
+                cand_offset = struct.unpack("<I", header[0x0D:0x11])[0]
+                if 0 < cand_offset < 1000000:
+                    f.seek(cand_offset)
+                    check = f.read(16)
+                    if check == sentinel:
+                        sentinel_pos = cand_offset
+            if sentinel_pos == -1:
+                f.seek(0)
+                data_chunk = f.read(65536)
+                sentinel_pos = data_chunk.find(sentinel)
+                if sentinel_pos == -1:
+                    return None
+            f.seek(sentinel_pos + 16)
+            meta = f.read(5)
+            if len(meta) < 5:
+                return None
+            num_images = min(meta[4], 32)
+            for _ in range(num_images):
+                img_desc = f.read(9)
+                if len(img_desc) < 9:
+                    break
+                code = img_desc[0]
+                start_offset = struct.unpack("<I", img_desc[1:5])[0]
+                img_size = struct.unpack("<I", img_desc[5:9])[0]
+                if img_size <= 0:
+                    continue
+                curr_pos = f.tell()
+                f.seek(start_offset)
+                img_data = f.read(img_size)
+                f.seek(curr_pos)
+                if code == 6 or img_data.startswith(b"\x89PNG\r\n\x1a\n"):
+                    return img_data
+                elif code == 2 or img_data.startswith(b"BM") or img_data.startswith(b"\x28\x00\x00\x00"):
+                    try:
+                        from PIL import Image
+
+                        if img_data.startswith(b"BM"):
+                            im = Image.open(io.BytesIO(img_data))
+                            out_buf = io.BytesIO()
+                            im.save(out_buf, format="PNG")
+                            return out_buf.getvalue()
+                        elif img_data.startswith(b"\x28\x00\x00\x00"):
+                            bi_bit_count = struct.unpack("<H", img_data[14:16])[0]
+                            bi_clr_used = struct.unpack("<I", img_data[32:36])[0]
+                            num_colors = (1 << bi_bit_count) if (bi_clr_used == 0 and bi_bit_count <= 8) else bi_clr_used
+                            palette_size = num_colors * 4
+                            offset_bits = 14 + 40 + palette_size
+                            bmp_header = b"BM" + struct.pack("<IHHI", 14 + len(img_data), 0, 0, offset_bits)
+                            full_bmp = bmp_header + img_data
+                            im = Image.open(io.BytesIO(full_bmp))
+                            out_buf = io.BytesIO()
+                            im.save(out_buf, format="PNG")
+                            return out_buf.getvalue()
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    return None
+
+
+def _bg_dwg_render_worker(path: Path, dpi: int) -> None:
+    try:
+        pdf_path, _ = dwg_to_model_pdf(path)
+        render_pdf(pdf_path, dpi=dpi, page_timeout_seconds=DWG_MODEL_PAGE_TIMEOUT_SECONDS)
+    except Exception:
+        pass
+    finally:
+        with _DWG_BG_LOCK:
+            _DWG_BG_ACTIVE.discard(str(path.resolve()).casefold())
+
+
+def trigger_bg_dwg_render(path: Path, dpi: int = DEFAULT_PDF_DPI) -> None:
+    path_key = str(path.resolve()).casefold()
+    with _DWG_BG_LOCK:
+        if path_key in _DWG_BG_ACTIVE:
+            return
+        _DWG_BG_ACTIVE.add(path_key)
+    thread = threading.Thread(target=_bg_dwg_render_worker, args=(path, dpi), daemon=True)
+    thread.start()
+
+
 def render_dwg_model(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
+    if not path.exists():
+        return {
+            "name": path.name,
+            "path": str(path),
+            "sourcePath": str(path),
+            "sourceName": path.name,
+            "sourceType": "DWG",
+            "dpi": dpi,
+            "pages": 0,
+            "renderedPages": 0,
+            "cacheKey": "",
+            "cacheHit": False,
+            "cacheHitPages": 0,
+            "newRenderedPages": 0,
+            "is_missing": True,
+            "errors": [{"error": f"DWG-файл не найден на диске: {path.name}", "is_missing": True}],
+            "items": [],
+            "status": "missing",
+            "convertedPdfPath": "",
+            "convertCacheHit": False,
+            "previewMode": "cad-smart-layouts",
+        }
+    if not path.is_file() or path.suffix.casefold() != ".dwg":
+        raise ValueError(f"Это не DWG-файл: {path}")
+
+    # 1. Проверяем, есть ли уже готовый векторный PDF (парный или в кэше)
+    paired_pdf = path.with_suffix(".pdf")
+    key = file_cache_key(path, "dwg-smart-cad-v2")
+    target_dir = DWG_CACHE_DIR / key
+    target_dir.mkdir(parents=True, exist_ok=True)
+    fallback_pdf = target_dir / f"{path.stem}.pdf"
+    manifest_path = target_dir / "manifest.json"
+
+    has_cached_pdf = False
+    if paired_pdf.exists() and paired_pdf.is_file() and paired_pdf.stat().st_size > 1024:
+        try:
+            if paired_pdf.stat().st_mtime_ns >= path.stat().st_mtime_ns:
+                has_cached_pdf = True
+        except OSError:
+            pass
+
+    if not has_cached_pdf and fallback_pdf.exists() and fallback_pdf.stat().st_size > 1024 and manifest_path.exists():
+        try:
+            m = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if (
+                m.get("sourcePath") == str(path)
+                and m.get("cacheKey") == key
+                and m.get("sourceMtimeNs") == path.stat().st_mtime_ns
+                and m.get("sourceSize") == path.stat().st_size
+            ):
+                has_cached_pdf = True
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    if has_cached_pdf:
+        pdf_path, convert_cache_hit = dwg_to_model_pdf(path)
+        document = render_pdf(pdf_path, dpi=dpi, page_timeout_seconds=DWG_MODEL_PAGE_TIMEOUT_SECONDS)
+        document["name"] = path.name
+        document["sourcePath"] = str(path)
+        document["sourceName"] = path.name
+        document["sourceType"] = "DWG"
+        document["convertedPdfPath"] = str(pdf_path)
+        document["convertCacheHit"] = convert_cache_hit
+        document["previewMode"] = "cad-smart-layouts"
+        return document
+
+    # 2. Level 1: Моментальное извлечение встроенного растра из заголовка DWG (< 1 мс)
+    cached_png = target_dir / "page-1.png"
+    if not (cached_png.exists() and cached_png.stat().st_size > 0):
+        raster_bytes = extract_dwg_embedded_raster(path)
+        if raster_bytes:
+            cached_png.write_bytes(raster_bytes)
+
+    if cached_png.exists() and cached_png.stat().st_size > 0:
+        # Запускаем фоновый рендеринг через AutoCAD COM в отдельном потоке (non-blocking)
+        trigger_bg_dwg_render(path, dpi)
+        return {
+            "name": path.name,
+            "path": str(path),
+            "sourcePath": str(path),
+            "sourceName": path.name,
+            "sourceType": "DWG",
+            "dpi": dpi,
+            "pages": 1,
+            "renderedPages": 1,
+            "cacheKey": key,
+            "cacheHit": True,
+            "cacheHitPages": 1,
+            "newRenderedPages": 0,
+            "errors": [],
+            "items": [
+                {
+                    "page": 1,
+                    "name": f"{path.name} · стр. 1",
+                    "url": f"/cache/dwg/{key}/page-1.png",
+                    "bytes": cached_png.stat().st_size,
+                }
+            ],
+            "status": "ok",
+            "convertedPdfPath": "",
+            "convertCacheHit": True,
+            "previewMode": "cad-smart-layouts",
+        }
+
+    # 3. Fallback: если встроенного превью не обнаружено, синхронный рендеринг
     pdf_path, convert_cache_hit = dwg_to_model_pdf(path)
     document = render_pdf(pdf_path, dpi=dpi, page_timeout_seconds=DWG_MODEL_PAGE_TIMEOUT_SECONDS)
     document["name"] = path.name
@@ -2059,6 +2405,24 @@ def excel_to_pdf(path: Path) -> tuple[Path, bool]:
 
 
 def render_excel(path: Path, dpi: int = DEFAULT_PDF_DPI, first_page_only: bool = False) -> dict:
+    if not path.exists():
+        return {
+            "name": path.name,
+            "path": str(path),
+            "sourcePath": str(path),
+            "sourceName": path.name,
+            "sourceType": file_extension(path),
+            "dpi": dpi,
+            "pages": 0,
+            "renderedPages": 0,
+            "cacheKey": "",
+            "cacheHit": False,
+            "cacheHitPages": 0,
+            "newRenderedPages": 0,
+            "is_missing": True,
+            "errors": [{"error": f"Таблица не найдена на диске: {path.name}", "is_missing": True}],
+            "items": [],
+        }
     pdf_path, convert_cache_hit = excel_to_pdf(path)
     document = render_pdf(pdf_path, dpi=dpi, first_page_only=first_page_only)
     document["sourcePath"] = str(path)
@@ -2083,7 +2447,21 @@ def render_pdf(
     first_page_only: bool = False,
 ) -> dict:
     if not path.exists():
-        raise FileNotFoundError(f"PDF не найден: {path}")
+        return {
+            "name": path.name,
+            "path": str(path),
+            "sourcePath": str(path),
+            "dpi": dpi,
+            "pages": 0,
+            "renderedPages": 0,
+            "cacheKey": "",
+            "cacheHit": False,
+            "cacheHitPages": 0,
+            "newRenderedPages": 0,
+            "is_missing": True,
+            "errors": [{"error": f"PDF не найден на диске: {path.name}", "is_missing": True}],
+            "items": [],
+        }
     if not path.is_file() or path.suffix.casefold() != ".pdf":
         raise ValueError(f"Это не PDF-файл: {path}")
 
@@ -2458,6 +2836,29 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 self.send_error(HTTPStatus.BAD_REQUEST, str(error))
             return
 
+        if parsed.path == "/api/dwg/thumbnail":
+            try:
+                params = parse_qs(parsed.query)
+                raw_path = params.get("path", [""])[0].strip()
+                if not raw_path:
+                    self.send_error(HTTPStatus.BAD_REQUEST, "Missing path")
+                    return
+                target = Path(raw_path).expanduser().resolve()
+                if not target.exists() or not target.is_file():
+                    self.send_error(HTTPStatus.NOT_FOUND, "File not found")
+                    return
+                from app.backend.dwg_engine import extract_raw_thumbnail_from_dwg, _generate_placeholder_png
+                thumb = extract_raw_thumbnail_from_dwg(target)
+                body = thumb[0] if thumb else _generate_placeholder_png(target.name, "Model")
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as error:
+                self.send_error(HTTPStatus.BAD_REQUEST, str(error))
+            return
+
         if parsed.path == "/api/objects":
             self.send_json(HTTPStatus.OK, {"items": list_object_summaries()})
             return
@@ -2556,8 +2957,8 @@ class LauncherHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/choose-folder":
-            # Минимальный рабочий вариант: один PowerShell FolderBrowserDialog,
-            # строго JSON в ответе, компактный лог жизненного цикла.
+            # Контракт docs/LOAD_BUTTON_CONTRACT.md: один PowerShell
+            # FolderBrowserDialog, строго JSON в ответе.
             try:
                 ps_command = (
                     "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
@@ -2565,8 +2966,12 @@ class LauncherHandler(BaseHTTPRequestHandler):
                     "$dlg = New-Object System.Windows.Forms.FolderBrowserDialog; "
                     '$dlg.Description = "Select object folder - FLauncher"; '
                     "$dlg.ShowNewFolderButton = $false; "
-                    "if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) "
-                    "{ [Console]::WriteLine($dlg.SelectedPath) }"
+                    "$owner = New-Object System.Windows.Forms.Form; "
+                    "$owner.TopMost = $true; $owner.ShowInTaskbar = $false; "
+                    "$null = $owner.Handle; "
+                    "try { if ($dlg.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) "
+                    "{ [Console]::WriteLine($dlg.SelectedPath) } } "
+                    "finally { $owner.Dispose(); $dlg.Dispose() }"
                 )
                 # Доводчик: диалог должен открыться главным окном, а не значком в фоне.
                 _bring_window_to_front(None, "#32770", 115.0, "Select object folder")
@@ -2584,12 +2989,10 @@ class LauncherHandler(BaseHTTPRequestHandler):
                         ps_command,
                     ],
                     capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="strict",
+                    text=False,
                     timeout=120,
                 )
-                selected = proc.stdout.strip().splitlines()[0].strip() if proc.stdout.strip() else ""
+                selected = decode_folder_dialog_output(proc.stdout)
                 if selected:
                     self.send_json(HTTPStatus.OK, {"path": selected})
                 else:
@@ -2796,7 +3199,26 @@ class LauncherHandler(BaseHTTPRequestHandler):
                     raise ValueError("DPI должен быть в диапазоне 72-600")
                 if not raw_file:
                     raise ValueError("Не выбран DWG-файл для отображения")
-                pdf_path, convert_cache_hit = dwg_to_model_pdf(Path(raw_file))
+                file_path = Path(raw_file)
+                key = file_cache_key(file_path, "dwg-smart-cad-v2")
+                cached_png = DWG_CACHE_DIR / key / f"page-{page}.png"
+                if cached_png.exists() and cached_png.stat().st_size > 0:
+                    self.send_json(
+                        HTTPStatus.OK,
+                        {
+                            "page": page,
+                            "name": f"{file_path.name} · стр. {page}",
+                            "url": f"/cache/dwg/{key}/{cached_png.name}",
+                            "bytes": cached_png.stat().st_size,
+                            "cacheHit": True,
+                            "sourcePath": raw_file,
+                            "sourceType": "DWG",
+                            "convertedPdfPath": "",
+                            "convertCacheHit": True,
+                        },
+                    )
+                    return
+                pdf_path, convert_cache_hit = dwg_to_model_pdf(file_path)
                 payload = render_pdf_page(pdf_path, page=page, dpi=dpi, page_timeout_seconds=DWG_MODEL_PAGE_TIMEOUT_SECONDS)
                 payload["sourcePath"] = raw_file
                 payload["sourceType"] = "DWG"
@@ -3045,6 +3467,8 @@ def main() -> None:
     PDF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     MANIFESTS_DIR.mkdir(exist_ok=True)
     (RUNTIME_DIR / "logs").mkdir(exist_ok=True)
+
+    atexit.register(lambda: kill_dwg_daemon("server-exit"))
 
     try:
         server = ThreadingHTTPServer((args.host, args.port), LauncherHandler)
