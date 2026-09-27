@@ -1762,35 +1762,123 @@ def open_in_explorer(path: Path) -> str:
             return "explorer-open-dir-subp"
 
 
+def _shell_open(target: str, params: str = "", cwd: str = "") -> bool:
+    """Универсальный вызов ShellExecuteW в нормальном видимом окне (SW_SHOWNORMAL = 1).
+    Это эталонный механизм Windows Shell для открытия любых файлов и программ.
+    Никогда не создаёт чёрных окон консоли и никогда не запускает окно скрытым.
+    """
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        res = ctypes.windll.shell32.ShellExecuteW(
+            None,
+            "open",
+            str(target),
+            str(params) if params else None,
+            str(cwd) if cwd else None,
+            1,  # SW_SHOWNORMAL = 1
+        )
+        # В Win32 API ShellExecute возвращает дескриптор экземпляра > 32 при успехе
+        return int(res) > 32
+    except Exception:
+        return False
+
+
 def launch_system_default(path: Path) -> str:
-    """Открыть файл программой Windows по умолчанию (ассоциация расширений)."""
+    """Открыть файл программой Windows по умолчанию (ассоциация расширений в системе)."""
     if not path.exists():
         raise FileNotFoundError(f"Файл или папка не найдены: {path}")
+    resolved = os.path.normpath(str(path.resolve()))
     if os.name != "nt":
         target = path if path.is_dir() else path.parent
         subprocess.Popen(["xdg-open", str(target)])
         return "xdg-open"
+
+    cwd = os.path.dirname(resolved)
+
+    # 1. ShellExecuteW("open", resolved, None, cwd, SW_SHOWNORMAL=1)
+    # Нативный вызов Windows Shell (открывает Chrome для PDF, AutoCAD для DWG, Word для DOCX и т.д.)
+    if _shell_open(resolved, "", cwd):
+        _bring_window_to_front(None, None, 120.0, path.name, 3)
+        return "system-default"
+
+    # 2. os.startfile (встроенная функция Python для Windows)
     try:
-        resolved = str(path.resolve())
+        if hasattr(os, "startfile"):
+            os.startfile(resolved)
+            _bring_window_to_front(None, None, 120.0, path.name, 3)
+            return "system-default"
+    except Exception:
+        pass
+
+    # 3. cmd /c start БЕЗ STARTF_USESHOWWINDOW (БЕЗ SW_HIDE!)
+    try:
+        creationflags = getattr(subprocess, "DETACHED_PROCESS", 0x00000008) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
         subprocess.Popen(
-            ["cmd", "/c", "start", "", resolved],
-            **hidden_process_kwargs(),
+            f'cmd.exe /c start "" "{resolved}"',
+            cwd=cwd,
+            shell=True,
+            creationflags=creationflags,
         )
         _bring_window_to_front(None, None, 120.0, path.name, 3)
         return "system-default"
     except Exception as err:
-        try:
-            os.startfile(str(path))
-            return "system-default"
-        except Exception as err2:
-            raise RuntimeError(f"Не удалось открыть программой по умолчанию: {err2}")
+        raise RuntimeError(f"Не удалось открыть программой по умолчанию: {err}")
+
+
+def launch_custom_app(exe_path: str, file_path: Path) -> str:
+    """Запустить файл в явно указанной пользователем программе (EXE)."""
+    resolved_file = os.path.normpath(str(file_path.resolve()))
+    resolved_exe = os.path.normpath(str(Path(exe_path).resolve()))
+    exe_dir = os.path.dirname(resolved_exe)
+    file_dir = os.path.dirname(resolved_file)
+
+    if os.name != "nt":
+        subprocess.Popen([resolved_exe, resolved_file], cwd=file_dir)
+        return f"custom-app:{Path(resolved_exe).name}"
+
+    # 1. ShellExecuteW("open", resolved_exe, f'"{resolved_file}"', file_dir, SW_SHOWNORMAL=1)
+    # Программа открывается полностью независимо от текущего процесса/Job Object,
+    # окно гарантированно видимо (SW_SHOWNORMAL = 1) и активно.
+    if _shell_open(resolved_exe, f'"{resolved_file}"', file_dir):
+        bring_native_window_to_front(0, resolved_exe)
+        _bring_window_to_front(None, None, 120.0, file_path.name, 3)
+        return f"custom-app:{Path(resolved_exe).name}"
+
+    # 2. subprocess.Popen с DETACHED_PROCESS и БЕЗ STARTF_USESHOWWINDOW (БЕЗ SW_HIDE!)
+    try:
+        creationflags = getattr(subprocess, "DETACHED_PROCESS", 0x00000008) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        proc = subprocess.Popen(
+            [resolved_exe, resolved_file],
+            cwd=file_dir,
+            creationflags=creationflags,
+        )
+        bring_native_window_to_front(proc.pid, resolved_exe)
+        _bring_window_to_front(None, None, 120.0, file_path.name, 3)
+        return f"custom-app:{Path(resolved_exe).name}"
+    except Exception:
+        pass
+
+    # 3. cmd /c start БЕЗ STARTF_USESHOWWINDOW
+    try:
+        creationflags = getattr(subprocess, "DETACHED_PROCESS", 0x00000008) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        cmd = f'cmd.exe /c start "" "{resolved_exe}" "{resolved_file}"'
+        subprocess.Popen(cmd, cwd=file_dir, shell=True, creationflags=creationflags)
+        bring_native_window_to_front(0, resolved_exe)
+        _bring_window_to_front(None, None, 120.0, file_path.name, 3)
+        return f"custom-app:{Path(resolved_exe).name}"
+    except Exception:
+        pass
+
+    # 4. Если прямой запуск не удался — системный запуск
+    return launch_system_default(file_path)
 
 
 def launch_native_file(path: Path) -> str:
     """Запустить файл в ассоциированной программе, либо открыть через системную ассоциацию Windows."""
     if not path.exists():
         raise FileNotFoundError(f"Файл или папка не найдены: {path}")
-    resolved = os.path.normpath(str(path.resolve()))
     if path.is_dir():
         return open_in_explorer(path)
 
@@ -1798,7 +1886,6 @@ def launch_native_file(path: Path) -> str:
     cfg = load_native_apps_config()
     use_native = bool(cfg.get("useNativeApps", True))
 
-    # 1. Поиск пути в настройках пользователя
     custom_raw = ""
     if use_native:
         custom_raw = str(
@@ -1808,54 +1895,22 @@ def launch_native_file(path: Path) -> str:
             or (cfg.get("settingDwgExe", "") if suffix in {".dwg", ".dxf"} else "")
             or (cfg.get("settingPdfExe", "") if suffix in {".pdf"} else "")
             or (cfg.get("settingWordExe", "") if suffix in {".doc", ".docx", ".rtf", ".odt"} else "")
-            or (cfg.get("settingExcelExe", "") if suffix in {".xls", ".xlsx", ".xlsm", ".csv", ".ods"} else "")
+            or (cfg.get("settingExcelExe", "") if suffix in {".xls", ".xlsx", ".xlsm", ".csv", ".ods", ".xlsb"} else "")
             or (cfg.get("settingPptExe", "") if suffix in {".ppt", ".pptx", ".odp"} else "")
             or (cfg.get("settingImgExe", "") if suffix in {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".tif", ".tiff", ".ico", ".svg"} else "")
+            or (cfg.get("settingArchExe", "") if suffix in {".zip", ".rar", ".7z", ".tar", ".gz"} else "")
+            or (cfg.get("settingTxtExe", "") if suffix in {".txt", ".log", ".ini", ".cfg", ".json", ".xml", ".yaml", ".yml"} else "")
             or (cfg.get("settingMediaExe", "") if suffix in {".mp4", ".avi", ".mov", ".mkv", ".wmv", ".mp3", ".wav"} else "")
         ).strip()
 
     clean_exe = _clean_configured_exe_path(custom_raw) if custom_raw else ""
-    if not clean_exe and custom_raw:
-        cand = custom_raw.strip('"').strip("'").strip()
-        if cand and Path(cand).is_file():
-            clean_exe = str(Path(cand).resolve())
-
-    # 2. Если настроен конкретный исполняемый файл — запускаем его
     if clean_exe and Path(clean_exe).is_file():
         try:
-            exe_path = str(Path(clean_exe).resolve())
-            exe_dir = str(Path(exe_path).parent)
-            if os.name == "nt":
-                # Запуск через cmd /c start гарантирует, что процесс стартует
-                # в независимом сеансе вне Job Object сервера лаунчера
-                try:
-                    subprocess.Popen(
-                        ["cmd.exe", "/c", "start", "", exe_path, resolved],
-                        cwd=exe_dir,
-                        **hidden_process_kwargs(),
-                    )
-                except Exception:
-                    creationflags = getattr(subprocess, "DETACHED_PROCESS", 0x00000008) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
-                    subprocess.Popen(
-                        [exe_path, resolved],
-                        cwd=exe_dir,
-                        creationflags=creationflags,
-                    )
-                bring_native_window_to_front(0, exe_path)
-                _bring_window_to_front(None, None, 120.0, Path(resolved).name, 3)
-                return f"custom-app:{Path(exe_path).name}"
-            else:
-                subprocess.Popen([exe_path, resolved], cwd=exe_dir)
-                return f"custom-app:{Path(exe_path).name}"
+            return launch_custom_app(clean_exe, path)
         except Exception:
             pass
 
-    # 3. Если отдельная программа не настроена или не запустилась — запускаем через системную ассоциацию Windows
-    try:
-        return launch_system_default(path)
-    except Exception:
-        return open_in_explorer(path)
-
+    return launch_system_default(path)
 
 NATIVE_OPEN_LOG_LOCK = threading.Lock()
 
@@ -2664,29 +2719,19 @@ def _clean_configured_exe_path(raw: str) -> str:
     if not raw:
         return ""
     raw = raw.strip()
-    # Strip quotes if entire string is quoted
+    # 1. Снимаем любые внешние кавычки
     stripped = raw.strip('"').strip("'").strip()
-    if stripped and Path(stripped).is_file():
-        return str(Path(stripped).resolve())
-    m = re.match(r'^"([^"]+\.exe)"', raw, re.IGNORECASE)
+    if stripped.lower().endswith(".exe"):
+        return stripped
+    # 2. Ищем путь в кавычках с .exe (например, из реестра: "C:\...\app.exe" "%1")
+    m = re.search(r'"([^"]+?\.exe)"', raw, re.IGNORECASE)
     if m:
-        cand = m.group(1)
-        if Path(cand).is_file():
-            return str(Path(cand).resolve())
-    m2 = re.match(r'^([a-zA-Z]:\\S+\.exe)', raw, re.IGNORECASE)
+        return m.group(1).strip()
+    # 3. Ищем путь с диском Windows без кавычек
+    m2 = re.search(r'([a-zA-Z]:\\[^\s"]+?\.exe)', raw, re.IGNORECASE)
     if m2:
-        cand = m2.group(1)
-        if Path(cand).is_file():
-            return str(Path(cand).resolve())
-    try:
-        parts = shlex.split(raw, posix=False)
-        for part in parts:
-            p = part.strip('"').strip("'")
-            if p.lower().endswith(".exe") and Path(p).is_file():
-                return str(Path(p).resolve())
-    except Exception:
-        pass
-    return ""
+        return m2.group(1).strip()
+    return stripped
 
 
 def _get_command_from_progid(progid: str) -> str:
@@ -3091,9 +3136,10 @@ class LauncherHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/config/apps/autodetect":
             try:
                 target_exts = [
-                    ".pdf", ".dwg", ".xlsx", ".xls", ".xlsm",
-                    ".docx", ".doc", ".txt", ".png", ".jpg",
-                    ".jpeg", ".pptx", ".mp4", ".zip", ".rar", ".7z"
+                    ".pdf", ".dwg", ".dxf", ".xlsx", ".xls", ".xlsm", ".csv", ".ods",
+                    ".docx", ".doc", ".rtf", ".odt", ".pptx", ".ppt", ".txt",
+                    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp",
+                    ".mp4", ".avi", ".mov", ".mkv", ".mp3", ".wav", ".zip", ".rar", ".7z"
                 ]
                 detected = {}
                 for ext in target_exts:

@@ -418,11 +418,15 @@ function getNativeAppLabel(ext = "") {
     const baseLower = base.toLowerCase();
     if (baseLower === "acad") return "AutoCAD";
     if (baseLower.includes("trueview")) return "DWG TrueView";
+    if (baseLower === "chrome") return "Google Chrome";
+    if (baseLower === "msedge") return "Microsoft Edge";
     if (baseLower === "winword") return "Word";
     if (baseLower === "excel") return "Excel";
     if (baseLower === "powerpnt") return "PowerPoint";
     if (baseLower === "acrobat" || baseLower === "acrord32") return "Adobe Acrobat";
     if (baseLower === "vlc") return "VLC";
+    if (baseLower === "mspaint") return "Paint";
+    if (baseLower === "notepad") return "Блокнот";
     return base;
   }
   const e = String(ext).toUpperCase().replace(/^\./, "");
@@ -460,7 +464,48 @@ function getNativeAppLabel(ext = "") {
     case "WMV":
     case "MP3":
     case "WAV": return "Медиаплеере";
+    case "ZIP":
+    case "RAR":
+    case "7Z":
+    case "TAR":
+    case "GZ": return "Архиваторе";
+    case "TXT":
+    case "LOG":
+    case "INI":
+    case "CFG":
+    case "JSON":
+    case "XML": return "Блокноте";
     default: return e ? `${e}` : "программе";
+  }
+}
+
+
+async function openFileByPath(path, action) {
+  if (!path) return;
+  const act = String(action || "explorer");
+  const rawExt = extOfPath(path);
+  const custom = settingsCustomExe(rawExt);
+  let actLabel = "Проводнике Windows";
+  if (act === "system") {
+    actLabel = "программе по умолчанию Windows";
+  } else if (act === "native") {
+    actLabel = custom ? getNativeAppLabel(rawExt) : "программе по умолчанию";
+  }
+  startProgress("Запуск: " + actLabel, path);
+  try {
+    const response = await fetch("/api/open-file", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, action: act }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "Не удалось открыть файл");
+    finishProgress("Открыто: " + actLabel);
+    showToast("Файл запущен: " + actLabel);
+    if (payload.longPathWarning) showNotice(payload.longPathWarning);
+  } catch (error) {
+    console.error("[Launcher] Failed to open file:", error);
+    showOperationError(error);
   }
 }
 
@@ -4404,6 +4449,15 @@ function settingsCustomExe(extension) {
     state.appSettings?.[withoutDot] ||
     state.appSettings?.[withDot.toUpperCase()] ||
     state.appSettings?.[withoutDot.toUpperCase()] ||
+    (withDot === ".dwg" || withDot === ".dxf" ? state.appSettings?.settingDwgExe : "") ||
+    (withDot === ".pdf" ? state.appSettings?.settingPdfExe : "") ||
+    ([".doc", ".docx", ".rtf", ".odt"].includes(withDot) ? state.appSettings?.settingWordExe : "") ||
+    ([".xls", ".xlsx", ".xlsm", ".csv", ".ods", ".xlsb"].includes(withDot) ? state.appSettings?.settingExcelExe : "") ||
+    ([".ppt", ".pptx", ".odp"].includes(withDot) ? state.appSettings?.settingPptExe : "") ||
+    ([".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".tif", ".tiff", ".ico", ".svg"].includes(withDot) ? state.appSettings?.settingImgExe : "") ||
+    ([".zip", ".rar", ".7z", ".tar", ".gz"].includes(withDot) ? state.appSettings?.settingArchExe : "") ||
+    ([".txt", ".log", ".ini", ".cfg", ".json", ".xml", ".yaml", ".yml"].includes(withDot) ? state.appSettings?.settingTxtExe : "") ||
+    ([".mp4", ".avi", ".mov", ".mkv", ".mp3", ".wav"].includes(withDot) ? state.appSettings?.settingMediaExe : "") ||
     ""
   ).trim();
 }
@@ -4470,21 +4524,39 @@ function hideFileContextMenu() {
 function showFileContextMenu(clientX, clientY, target) {
   const menu = els.contextMenu;
   if (!menu || !target?.path) return;
-  const items = [
-    { label: "Открыть в проводнике", run: () => openFileByPath(target.path, "explorer") },
-  ];
+  const items = [];
   if (!target.isDir) {
-    const custom = settingsCustomExe(target.ext);
-    const label = getNativeAppLabel(target.ext);
+    const rawExt = target.ext || extOfPath(target.path) || "";
+    const custom = settingsCustomExe(rawExt);
+    const label = getNativeAppLabel(rawExt);
     if (custom) {
-      items.push({ label: `Открыть в ${label}`, run: () => openFileByPath(target.path, "native") });
-      items.push({ label: "Открыть в программе по умолчанию", run: () => openFileByPath(target.path, "system") });
+      items.push({
+        label: `Открыть в ${label}`,
+        run: () => openFileByPath(target.path, "native"),
+      });
+      items.push({
+        label: "Открыть в программе по умолчанию",
+        run: () => openFileByPath(target.path, "system"),
+      });
     } else {
-      items.push({ label: "Открыть в программе", run: () => openFileByPath(target.path, "system") });
+      items.push({
+        label: `Открыть в ${label}`,
+        run: () => openFileByPath(target.path, "native"),
+      });
     }
+    items.push({ sep: true });
   }
+  items.push({
+    label: "Открыть в проводнике",
+    run: () => openFileByPath(target.path, "explorer"),
+  });
   items.push({ sep: true });
-  items.push({ label: "Скопировать путь", hint: "", run: () => copyPathToClipboard(target.path) });
+  items.push({
+    label: "Скопировать путь",
+    hint: "",
+    run: () => copyPathToClipboard(target.path),
+  });
+
   menu.replaceChildren();
   for (const it of items) {
     if (it.sep) {
