@@ -9,6 +9,7 @@
 import atexit
 import ctypes
 from ctypes import wintypes
+import json
 import os
 import shutil
 import socket
@@ -174,22 +175,61 @@ def assign_process_to_job(proc) -> bool:
     return False
 
 
-def shutdown_server(proc) -> None:
-    if not proc:
-        return
+def get_pids_on_port(port: int) -> set[int]:
+    pids = set()
     try:
-        if proc.poll() is None:
-            log(f"Shutting down server pid {proc.pid}...")
-            proc.terminate()
+        out = subprocess.run(
+            ["netstat", "-ano", "-p", "TCP"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+        for line in (out or "").splitlines():
+            parts = line.split()
+            if len(parts) >= 5 and parts[0] == "TCP" \
+                    and parts[1].endswith(":%d" % port) and parts[3] == "LISTENING":
+                if parts[4].isdigit():
+                    pids.add(int(parts[4]))
+    except Exception:
+        pass
+    return pids
+
+
+def shutdown_server(proc, port: int | None = None) -> None:
+    # 1. Завершаем серверный процесс и его дерево процессов
+    if proc:
+        try:
+            if proc.poll() is None:
+                log(f"Shutting down server pid {proc.pid}...")
+                if os.name == "nt":
+                    try:
+                        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, timeout=5)
+                    except Exception:
+                        pass
+                proc.terminate()
+                try:
+                    proc.wait(timeout=1.5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=1.0)
+                log(f"Server pid {proc.pid} stopped successfully")
+        except Exception as e:
+            log(f"Error during shutdown_server proc: {e}")
+
+    # 2. Если сервер работал на порту (даже если был найден ранее запущенным)
+    if port:
+        for pid in get_pids_on_port(port):
             try:
-                proc.wait(timeout=2.0)
-            except subprocess.TimeoutExpired:
-                log(f"Force-killing server pid {proc.pid} after timeout...")
-                proc.kill()
-                proc.wait(timeout=1.0)
-            log(f"Server pid {proc.pid} stopped successfully")
-    except Exception as e:
-        log(f"Error during shutdown_server: {e}")
+                log(f"Killing listener process pid {pid} on port {port}...")
+                if os.name == "nt":
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, timeout=5)
+            except Exception:
+                pass
+
+    # 3. Гарантированно зачищаем любые осиротевшие невидимые фоновые сессии AutoCAD без окон
+    if os.name == "nt":
+        try:
+            subprocess.run(["taskkill", "/F", "/FI", "WINDOWTITLE eq ", "/IM", "acad.exe"], capture_output=True, timeout=5)
+        except Exception:
+            pass
 
 
 def log(msg: str) -> None:
@@ -206,7 +246,13 @@ def is_server_healthy(port: int) -> bool:
     try:
         req = urllib.request.Request(f"http://127.0.0.1:{port}/api/health")
         with urllib.request.urlopen(req, timeout=0.8) as resp:
-            return resp.status == 200
+            if resp.status != 200:
+                return False
+            data = json.loads(resp.read().decode("utf-8"))
+            repo = data.get("repoRoot", "")
+            if repo and os.path.normcase(os.path.abspath(repo)) != os.path.normcase(os.path.abspath(REPO_ROOT)):
+                return False
+            return True
     except Exception:
         return False
 
@@ -355,8 +401,7 @@ def main():
             return
 
     port, server_proc = find_or_start_server()
-    if server_proc:
-        atexit.register(lambda: shutdown_server(server_proc))
+    atexit.register(lambda: shutdown_server(server_proc, port))
 
     url = f"http://127.0.0.1:{port}/"
 
@@ -380,7 +425,7 @@ def main():
         try:
             def _on_window_closed(*args, **kwargs):
                 log("Window closed event received, stopping server...")
-                shutdown_server(server_proc)
+                shutdown_server(server_proc, port)
             window.events.closed += _on_window_closed
         except Exception as e:
             log(f"Could not bind on_closed event: {e}")
@@ -388,7 +433,7 @@ def main():
         opened_webview = True
         webview.start(icon=ICON if os.path.exists(ICON) else None)
         # После выхода из webview.start() (окно закрыто)
-        shutdown_server(server_proc)
+        shutdown_server(server_proc, port)
     except Exception as e:
         log(f"pywebview failed: {e}, falling back to browser window")
         if not opened_webview:

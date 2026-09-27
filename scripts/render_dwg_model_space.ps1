@@ -1,4 +1,4 @@
-﻿param(
+param(
   [Parameter(Mandatory = $true)][string]$InputPath,
   [Parameter(Mandatory = $true)][string]$OutputPath
 )
@@ -13,8 +13,19 @@ if (-not (Test-Path -LiteralPath $InputPath -PathType Leaf)) {
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $OutputPath) | Out-Null
 Remove-Item -LiteralPath $OutputPath -Force -ErrorAction SilentlyContinue
 
+if (-not ([System.Management.Automation.PSTypeName]'LauncherWin32').Type) {
+  Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class LauncherWin32 {
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+}
+"@
+}
+
 $app = $null
 $document = $null
+$cadPid = 0
 try {
   # Open read-only.  The original DWG and its source directory are never a
   # write target for the preview pipeline.
@@ -32,6 +43,13 @@ try {
   if (-not $app) {
     throw "CAD COM error: AutoCAD could not be initialized."
   }
+  try {
+    $hwnd = [IntPtr]::new([long]$app.HWND)
+    [uint32]$pidOut = 0
+    [void][LauncherWin32]::GetWindowThreadProcessId($hwnd, [ref]$pidOut)
+    if ($pidOut -gt 0) { $cadPid = [int]$pidOut }
+  } catch {}
+
   $app.Visible = $false
   $document = $app.Documents.Open($InputPath, $true)
   $document.SetVariable("BACKGROUNDPLOT", 0)
@@ -75,6 +93,29 @@ try {
   }
 } finally {
   try { [LauncherMessageFilter]::Revoke() } catch {}
-  if ($document) { $document.Close($false) }
-  if ($app) { $app.Quit() }
+  if ($document) {
+    try { $document.Close($false) } catch {}
+    try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($document) | Out-Null } catch {}
+  }
+  if ($app) {
+    try { $app.Quit() } catch {}
+    try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($app) | Out-Null } catch {}
+  }
+  [System.GC]::Collect()
+  [System.GC]::WaitForPendingFinalizers()
+
+  if ($cadPid -gt 0) {
+    $deadline = (Get-Date).AddSeconds(3)
+    while ((Get-Date) -lt $deadline) {
+      $p = Get-Process -Id $cadPid -ErrorAction SilentlyContinue
+      if (-not $p -or $p.HasExited) { break }
+      Start-Sleep -Milliseconds 200
+    }
+    try {
+      $p = Get-Process -Id $cadPid -ErrorAction SilentlyContinue
+      if ($p -and -not $p.HasExited) {
+        Stop-Process -Id $cadPid -Force -ErrorAction SilentlyContinue
+      }
+    } catch {}
+  }
 }
