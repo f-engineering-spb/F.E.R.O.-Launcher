@@ -116,6 +116,7 @@ const els = {
   settingsCloseBtn: document.getElementById("settingsCloseBtn"),
   settingsCancelBtn: document.getElementById("settingsCancelBtn"),
   settingsSaveBtn: document.getElementById("settingsSaveBtn"),
+  settingsAutoDetectBtn: document.getElementById("settingsAutoDetectBtn"),
 
 };
 
@@ -4549,6 +4550,54 @@ function closeSettingsModal() {
   if (els.settingsModal) els.settingsModal.hidden = true;
 }
 
+async function autoDetectWindowsApps() {
+  const btn = document.getElementById("settingsAutoDetectBtn");
+  const prevText = btn ? btn.textContent : "";
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "⏳ Опрос ассоциаций Windows...";
+  }
+  showToast("Определение программ по умолчанию в Windows...");
+  try {
+    const res = await fetch("/api/config/apps/autodetect", {
+      method: "POST",
+      headers: { Accept: "application/json" }
+    });
+    if (!res.ok) {
+      throw new Error(`Сервер вернул статус HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    const detected = data.detected || {};
+    let filledCount = 0;
+    
+    // Подставляем найденные пути в поля ввода
+    document.querySelectorAll("#settingsAppsForm .settings-input").forEach((input) => {
+      const exts = String(input.dataset.exts || "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
+      // Ищем первое совпадение среди расширений группы
+      for (const ext of exts) {
+        if (detected[ext]) {
+          input.value = detected[ext];
+          filledCount++;
+          break;
+        }
+      }
+    });
+
+    if (filledCount > 0) {
+      showToast(`Успешно заполнено категорий: ${filledCount}. Нажмите «Сохранить»!`);
+    } else {
+      showToast("В Windows не найдены явные файловые ассоциации или программы отсутствуют.");
+    }
+  } catch (err) {
+    showToast(`Ошибка автоопределения: ${err.message || err}`);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = prevText;
+    }
+  }
+}
+
 async function saveSettings() {
   const cfg = {
     useNativeApps: state.appSettings?.useNativeApps !== false,
@@ -4615,6 +4664,7 @@ if (els.btnSettings) els.btnSettings.addEventListener("click", openSettingsModal
 if (els.settingsCloseBtn) els.settingsCloseBtn.addEventListener("click", closeSettingsModal);
 if (els.settingsCancelBtn) els.settingsCancelBtn.addEventListener("click", closeSettingsModal);
 if (els.settingsSaveBtn) els.settingsSaveBtn.addEventListener("click", saveSettings);
+if (els.settingsAutoDetectBtn) els.settingsAutoDetectBtn.addEventListener("click", autoDetectWindowsApps);
 if (els.settingsModal) {
   els.settingsModal.addEventListener("click", (event) => {
     if (event.target === els.settingsModal) closeSettingsModal();

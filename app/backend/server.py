@@ -1477,6 +1477,139 @@ DEFAULT_NATIVE_APPS: dict[str, Any] = {
     ".wav": "",
 }
 
+try:
+    import winreg
+except ImportError:
+    winreg = None
+
+
+def _clean_configured_exe_path(raw: str) -> str:
+    if not raw:
+        return ""
+    raw = raw.strip()
+    m = re.match(r'^"([^"]+\.exe)"', raw, re.IGNORECASE)
+    if m:
+        cand = m.group(1)
+        if Path(cand).is_file():
+            return str(Path(cand).resolve())
+    m2 = re.match(r'^([a-zA-Z]:\\S+\.exe)', raw, re.IGNORECASE)
+    if m2:
+        cand = m2.group(1)
+        if Path(cand).is_file():
+            return str(Path(cand).resolve())
+    try:
+        parts = shlex.split(raw, posix=False)
+        for part in parts:
+            p = part.strip('"')
+            if p.lower().endswith(".exe") and Path(p).is_file():
+                return str(Path(p).resolve())
+    except Exception:
+        pass
+    return ""
+
+
+def _get_command_from_progid(progid: str) -> str:
+    if not winreg or not progid:
+        return ""
+    keys_to_try = [
+        f"{progid}\\shell\\open\\command",
+        f"{progid}\\shell\\Open\\command",
+        f"{progid}\\shell\\edit\\command",
+    ]
+    for subkey in keys_to_try:
+        try:
+            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, subkey) as k:
+                val, _ = winreg.QueryValueEx(k, "")
+                cleaned = _clean_configured_exe_path(val)
+                if cleaned:
+                    return cleaned
+        except OSError:
+            pass
+    return ""
+
+
+def detect_windows_app_for_ext(ext: str) -> str:
+    """Определяет установленную в Windows программу по умолчанию для расширения."""
+    if not winreg:
+        return ""
+    ext = ext.lower().strip()
+    if not ext.startswith("."):
+        ext = "." + ext
+
+    # 1. UserChoice (Windows 10 / 11 modern default)
+    user_choice = f"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\{ext}\\UserChoice"
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, user_choice) as k:
+            progid, _ = winreg.QueryValueEx(k, "ProgId")
+            res = _get_command_from_progid(progid)
+            if res:
+                return res
+    except OSError:
+        pass
+
+    # 2. HKEY_CLASSES_ROOT default ProgID
+    try:
+        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, ext) as k:
+            progid = winreg.QueryValue(k, "")
+            res = _get_command_from_progid(progid)
+            if res:
+                return res
+    except OSError:
+        pass
+
+    # 3. OpenWithProgids
+    openwith = f"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\{ext}\\OpenWithProgids"
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, openwith) as k:
+            i = 0
+            while True:
+                try:
+                    name, _, _ = winreg.EnumValue(k, i)
+                    res = _get_command_from_progid(name)
+                    if res:
+                        return res
+                    i += 1
+                except OSError:
+                    break
+    except OSError:
+        pass
+
+    # 4. Applications subkey in OpenWithList
+    try:
+        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, f"{ext}\\OpenWithList") as k:
+            i = 0
+            while True:
+                try:
+                    subk_name = winreg.EnumKey(k, i)
+                    app_key = f"Applications\\{subk_name}\\shell\\open\\command"
+                    try:
+                        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, app_key) as ak:
+                            val, _ = winreg.QueryValueEx(ak, "")
+                            cleaned = _clean_configured_exe_path(val)
+                            if cleaned:
+                                return cleaned
+                    except OSError:
+                        pass
+                    i += 1
+                except OSError:
+                    break
+    except OSError:
+        pass
+
+    return ""
+
+
+def detect_all_windows_default_apps() -> dict[str, str]:
+    """Сканирует реестр Windows для всех известных расширений лаунчера."""
+    results = {}
+    for ext in DEFAULT_NATIVE_APPS:
+        if ext.startswith("."):
+            found = detect_windows_app_for_ext(ext)
+            if found:
+                results[ext] = found
+    return results
+
+
 def load_native_apps_config() -> dict[str, Any]:
     if NATIVE_APPS_CONFIG_FILE.exists():
         try:
@@ -2928,6 +3061,16 @@ class LauncherHandler(BaseHTTPRequestHandler):
 
             res = check_for_updates()
             self.send_json(HTTPStatus.OK, res)
+            return
+
+        if parsed.path in ("/api/config/apps/autodetect", "/api/config/apps/detect"):
+            detected = detect_all_windows_default_apps()
+            self.send_json(HTTPStatus.OK, {"ok": True, "detected": detected})
+            return
+
+        if parsed.path in ("/api/config/apps/autodetect", "/api/config/apps/detect"):
+            detected = detect_all_windows_default_apps()
+            self.send_json(HTTPStatus.OK, {"ok": True, "detected": detected})
             return
 
         if parsed.path == "/api/config/apps":
