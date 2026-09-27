@@ -2818,6 +2818,59 @@ def render_pdf_page(path: Path, page: int, dpi: int = DEFAULT_PDF_DPI, page_time
     }
 
 
+def handle_choose_exe_request(handler: http.server.BaseHTTPRequestHandler) -> None:
+    """Выбор исполняемого файла (.exe) через системный диалог OpenFileDialog Windows."""
+    try:
+        ps_command = (
+            "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+            "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+            "Add-Type -AssemblyName System.Windows.Forms; "
+            "$dlg = New-Object System.Windows.Forms.OpenFileDialog; "
+            '$dlg.Filter = "Исполняемые файлы (*.exe)|*.exe|Все файлы (*.*)|*.*"; '
+            '$dlg.Title = "Выберите программу для запуска (.exe)"; '
+            "$dlg.RestoreDirectory = $true; "
+            "$owner = New-Object System.Windows.Forms.Form; "
+            "$owner.TopMost = $true; $owner.ShowInTaskbar = $false; "
+            "$null = $owner.Handle; "
+            "try { if ($dlg.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) "
+            "{ [Console]::WriteLine($dlg.FileName) } } "
+            "finally { $owner.Dispose(); $dlg.Dispose() }"
+        )
+        _bring_window_to_front(None, "#32770", 115.0, "Выберите программу")
+        creation_flags = 0
+        if os.name == "nt":
+            creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        proc = subprocess.run(
+            [
+                "powershell.exe",
+                "-WindowStyle",
+                "Hidden",
+                "-STA",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                ps_command,
+            ],
+            capture_output=True,
+            text=False,
+            timeout=120,
+            creationflags=creation_flags,
+        )
+        selected = decode_folder_dialog_output(proc.stdout)
+        if selected and Path(selected).is_file():
+            handler.send_json(HTTPStatus.OK, {"path": selected})
+        else:
+            handler.send_json(HTTPStatus.OK, {"path": ""})
+    except subprocess.TimeoutExpired:
+        handler.send_json(
+            HTTPStatus.OK,
+            {"path": "", "timedOut": True, "error": "Диалог выбора программы не ответил за 120 секунд."},
+        )
+    except Exception as error:
+        handler.send_json(HTTPStatus.OK, {"path": "", "error": f"Ошибка вызова диалога: {error}"})
+
+
 class LauncherHandler(BaseHTTPRequestHandler):
     server_version = "FEngineeringLauncherV3/0.1"
 
@@ -2879,6 +2932,10 @@ class LauncherHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/config/apps":
             self.send_json(HTTPStatus.OK, load_native_apps_config())
+            return
+
+        if parsed.path == "/api/choose-exe":
+            handle_choose_exe_request(self)
             return
 
         if parsed.path == "/api/file/raw":
@@ -3097,56 +3154,7 @@ class LauncherHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/choose-exe":
-            # Выбор исполняемого файла (.exe) через системный диалог OpenFileDialog Windows
-            try:
-                ps_command = (
-                    "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
-                    "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
-                    "Add-Type -AssemblyName System.Windows.Forms; "
-                    "$dlg = New-Object System.Windows.Forms.OpenFileDialog; "
-                    '$dlg.Filter = "Исполняемые файлы (*.exe)|*.exe|Все файлы (*.*)|*.*"; '
-                    '$dlg.Title = "Выберите программу для запуска (.exe)"; '
-                    "$dlg.RestoreDirectory = $true; "
-                    "$owner = New-Object System.Windows.Forms.Form; "
-                    "$owner.TopMost = $true; $owner.ShowInTaskbar = $false; "
-                    "$null = $owner.Handle; "
-                    "try { if ($dlg.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) "
-                    "{ [Console]::WriteLine($dlg.FileName) } } "
-                    "finally { $owner.Dispose(); $dlg.Dispose() }"
-                )
-                _bring_window_to_front(None, "#32770", 115.0, "Выберите программу")
-                creation_flags = 0
-                if os.name == "nt":
-                    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-                proc = subprocess.run(
-                    [
-                        "powershell.exe",
-                        "-WindowStyle",
-                        "Hidden",
-                        "-STA",
-                        "-NoProfile",
-                        "-ExecutionPolicy",
-                        "Bypass",
-                        "-Command",
-                        ps_command,
-                    ],
-                    capture_output=True,
-                    text=False,
-                    timeout=120,
-                    creationflags=creation_flags,
-                )
-                selected = decode_folder_dialog_output(proc.stdout)
-                if selected and Path(selected).is_file():
-                    self.send_json(HTTPStatus.OK, {"path": selected})
-                else:
-                    self.send_json(HTTPStatus.OK, {"path": ""})
-            except subprocess.TimeoutExpired:
-                self.send_json(
-                    HTTPStatus.OK,
-                    {"path": "", "timedOut": True, "error": "Диалог выбора программы не ответил за 120 секунд."},
-                )
-            except Exception as error:
-                self.send_json(HTTPStatus.OK, {"path": "", "error": f"Ошибка вызова диалога: {error}"})
+            handle_choose_exe_request(self)
             return
 
         if parsed.path == "/api/pdf/render":

@@ -4588,9 +4588,12 @@ async function browseExeForSetting(inputId) {
   }
   showToast("Открывается диалог выбора файла Windows...");
   try {
-    const res = await fetch("/api/choose-exe");
+    const res = await fetch("/api/choose-exe", {
+      method: "POST",
+      headers: { Accept: "application/json" }
+    });
     if (!res.ok) {
-      throw new Error(`Сервер вернул ошибку HTTP ${res.status}`);
+      throw new Error(`Сервер вернул статус HTTP ${res.status}`);
     }
     const data = await res.json();
     if (data.path) {
@@ -4600,7 +4603,7 @@ async function browseExeForSetting(inputId) {
       showToast(data.error);
     }
   } catch (err) {
-    showToast(`Не удалось открыть диалог: ${err.message || err}`);
+    showToast(`Ошибка открытия диалога: ${err.message || err}`);
   } finally {
     if (currentBtn) {
       currentBtn.disabled = false;
