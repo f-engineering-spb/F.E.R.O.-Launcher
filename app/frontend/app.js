@@ -618,7 +618,7 @@ async function excludeSelectedObject() {
 function getCachedFlatNodes() {
   if (!state.currentManifest?.tree) return [];
   if (!state.currentManifest._flatNodes) {
-    state.currentManifest._flatNodes = getCachedFlatNodes();
+    state.currentManifest._flatNodes = flattenTree(state.currentManifest.tree);
   }
   return state.currentManifest._flatNodes;
 }
@@ -984,15 +984,21 @@ function nodeMatches(node, visiting = new Set()) {
   return res;
 }
 
-function countDiffDescendants(node, result = { added: 0, changed: 0, removed: 0 }, seen = new Set()) {
-  if (!node || seen.has(node)) return result;
-  seen.add(node);
-  for (const child of node.children || []) {
-    if (child.type === "file") {
-      const status = state.diffStatus.get(child.path);
-      if (status && status in result) result[status] += 1;
-    } else {
-      countDiffDescendants(child, result, seen);
+function countDiffDescendants(node, result = { added: 0, changed: 0, removed: 0 }) {
+  if (!node) return result;
+  const stack = [node];
+  const seen = new Set();
+  while (stack.length) {
+    const current = stack.pop();
+    if (!current || seen.has(current)) continue;
+    seen.add(current);
+    for (const child of current.children || []) {
+      if (child.type === "file") {
+        const status = state.diffStatus.get(child.path);
+        if (status && status in result) result[status] += 1;
+      } else {
+        stack.push(child);
+      }
     }
   }
   return result;
@@ -1667,145 +1673,154 @@ function collapseAllFolders() {
   }
 }
 
-function renderTreeNode(node, parent) {
-  if (!nodeMatches(node)) return;
+function renderTreeNode(rootNode, rootParent) {
+  // Итеративный обход: стек хранит {node, parent} — что вставить и куда.
+  const stack = [{ node: rootNode, parent: rootParent }];
+  while (stack.length) {
+    const { node, parent } = stack.pop();
+    if (!nodeMatches(node)) continue;
 
-  const nodeEl = document.createElement("div");
-  nodeEl.className = "tree-node";
-  const collapsed = state.collapsedFolders.has(node.path) && !treeFilteringActive();
-  if (node.type === "folder" && !collapsed) {
-    nodeEl.classList.add("expanded");
-  }
-
-  const row = document.createElement("div");
-  row.className = `tree-row ${node.type}`;
-  row.dataset.path = node.path;
-  if (node.path === state.revealedPath) row.classList.add("thumb-reveal");
-  row.classList.toggle("selected", state.selectedPaths.has(node.path));
-  row.title = node.path;
-
-  const content = document.createElement("div");
-  content.className = "tree-row-content";
-
-  const chevron = document.createElement("span");
-  chevron.className = "tree-chevron";
-  if (node.type === "folder") {
-    chevron.textContent = "›";
-    if (!collapsed) chevron.classList.add("expanded");
-    chevron.title = collapsed ? "Развернуть папку" : "Свернуть папку";
-    chevron.addEventListener("click", (e) => {
-      e.stopPropagation();
-      toggleFolderNode(node, nodeEl);
-    });
-  } else {
-    chevron.classList.add("leaf");
-    chevron.innerHTML = "&nbsp;";
-  }
-  content.append(chevron);
-
-  const iconEl = document.createElement("span");
-  iconEl.className = "tree-icon";
-  if (node === state.currentManifest?.tree) {
-    iconEl.innerHTML = `<svg viewBox="0 0 16 16" width="15" height="15"><path fill="#ffffff" stroke="#718096" stroke-width="0.9" d="M3 1.5A1.5 1.5 0 0 1 4.5 0h6l4 4v10.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 3 14.5v-13z"/><path fill="#3b82f6" d="M5 6h6v1.2H5zm0 3h6v1.2H5zm0 3h4v1.2H5z"/></svg>`;
-  } else if (node.type === "folder") {
-    iconEl.innerHTML = FOLDER_ICON_SVG;
-  } else {
-    iconEl.innerHTML = getFileIconSvg(node.extension);
-  }
-  content.append(iconEl);
-
-  const nameEl = document.createElement("span");
-  nameEl.className = "tree-name";
-  nameEl.textContent = node.name;
-
-  const diffStatus = state.diffStatus.get(node.path);
-  if (node.type === "file" && diffStatus) {
-    const diffBadge = document.createElement("span");
-    diffBadge.className = `diff-badge diff-${diffStatus}`;
-    diffBadge.textContent = diffStatusText(diffStatus);
-    nameEl.append(" ", diffBadge);
-  }
-  if (node.type === "folder" && state.diffSummary) {
-    const counts = countDiffDescendantsCached(node);
-    const parts = [];
-    if (counts.added) parts.push(`+${counts.added}`);
-    if (counts.changed) parts.push(`~${counts.changed}`);
-    if (counts.removed) parts.push(`-${counts.removed}`);
-    if (parts.length) {
-      const diffFolderBadge = document.createElement("span");
-      diffFolderBadge.className = "diff-badge diff-folder";
-      diffFolderBadge.textContent = parts.join(" ");
-      nameEl.append(" ", diffFolderBadge);
+    const nodeEl = document.createElement("div");
+    nodeEl.className = "tree-node";
+    const collapsed = state.collapsedFolders.has(node.path) && !treeFilteringActive();
+    if (node.type === "folder" && !collapsed) {
+      nodeEl.classList.add("expanded");
     }
-  }
-  if (node.type === "file" && node.extension === "DWG") {
-    const pdfPair = getPdfPairForDwgCached(node);
-    if (pdfPair) {
-      const pairBadge = document.createElement("span");
-      pairBadge.className = "pair-badge";
-      pairBadge.textContent = "↔";
-      pairBadge.title = `Связан с PDF-превью: ${pdfPair.node.name}${pdfPair.confidence === "probable" ? " (вероятная пара)" : ""}`;
-      nameEl.append(" ", pairBadge);
-    }
-  }
-  content.append(nameEl);
 
-  if (node.type === "folder" && node.children) {
-    const metaEl = document.createElement("span");
-    metaEl.className = "tree-meta";
-    metaEl.textContent = `(${node.children.length})`;
-    content.append(metaEl);
-  }
+    const row = document.createElement("div");
+    row.className = `tree-row ${node.type}`;
+    row.dataset.path = node.path;
+    if (node.path === state.revealedPath) row.classList.add("thumb-reveal");
+    row.classList.toggle("selected", state.selectedPaths.has(node.path));
+    row.title = node.path;
 
-  row.append(content);
-  row.addEventListener("contextmenu", (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    showFileContextMenu(event.clientX, event.clientY, {
-      path: node.path,
-      isDir: node.type === "folder",
-      ext: node.extension || "",
-    });
-  });
+    const content = document.createElement("div");
+    content.className = "tree-row-content";
 
-  row.addEventListener("click", (event) => {
-    event.stopPropagation();
+    const chevron = document.createElement("span");
+    chevron.className = "tree-chevron";
     if (node.type === "folder") {
-      const wasCollapsed = state.collapsedFolders.has(node.path);
-      if (wasCollapsed && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
-        toggleFolderNode(node, nodeEl);
+      chevron.textContent = "›";
+      if (!collapsed) chevron.classList.add("expanded");
+      chevron.title = collapsed ? "Развернуть папку" : "Свернуть папку";
+      chevron.addEventListener("click", ((n, el) => (e) => {
+        e.stopPropagation();
+        toggleFolderNode(n, el);
+      })(node, nodeEl));
+    } else {
+      chevron.classList.add("leaf");
+      chevron.innerHTML = "&nbsp;";
+    }
+    content.append(chevron);
+
+    const iconEl = document.createElement("span");
+    iconEl.className = "tree-icon";
+    if (node === state.currentManifest?.tree) {
+      iconEl.innerHTML = `<svg viewBox="0 0 16 16" width="15" height="15"><path fill="#ffffff" stroke="#718096" stroke-width="0.9" d="M3 1.5A1.5 1.5 0 0 1 4.5 0h6l4 4v10.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 3 14.5v-13z"/><path fill="#3b82f6" d="M5 6h6v1.2H5zm0 3h6v1.2H5zm0 3h4v1.2H5z"/></svg>`;
+    } else if (node.type === "folder") {
+      iconEl.innerHTML = FOLDER_ICON_SVG;
+    } else {
+      iconEl.innerHTML = getFileIconSvg(node.extension);
+    }
+    content.append(iconEl);
+
+    const nameEl = document.createElement("span");
+    nameEl.className = "tree-name";
+    nameEl.textContent = node.name;
+
+    const diffStatus = state.diffStatus.get(node.path);
+    if (node.type === "file" && diffStatus) {
+      const diffBadge = document.createElement("span");
+      diffBadge.className = `diff-badge diff-${diffStatus}`;
+      diffBadge.textContent = diffStatusText(diffStatus);
+      nameEl.append(" ", diffBadge);
+    }
+    if (node.type === "folder" && state.diffSummary) {
+      const counts = countDiffDescendantsCached(node);
+      const parts = [];
+      if (counts.added) parts.push(`+${counts.added}`);
+      if (counts.changed) parts.push(`~${counts.changed}`);
+      if (counts.removed) parts.push(`-${counts.removed}`);
+      if (parts.length) {
+        const diffFolderBadge = document.createElement("span");
+        diffFolderBadge.className = "diff-badge diff-folder";
+        diffFolderBadge.textContent = parts.join(" ");
+        nameEl.append(" ", diffFolderBadge);
       }
-      selectNode(node, event);
-      return;
     }
-    selectNode(node, event);
-  });
-
-  row.addEventListener("dblclick", (event) => {
-    event.stopPropagation();
-    if (node.type === "folder") {
-      toggleFolderNode(node, nodeEl);
-      return;
+    if (node.type === "file" && node.extension === "DWG") {
+      const pdfPair = getPdfPairForDwgCached(node);
+      if (pdfPair) {
+        const pairBadge = document.createElement("span");
+        pairBadge.className = "pair-badge";
+        pairBadge.textContent = "↔";
+        pairBadge.title = `Связан с PDF-превью: ${pdfPair.node.name}${pdfPair.confidence === "probable" ? " (вероятная пара)" : ""}`;
+        nameEl.append(" ", pairBadge);
+      }
     }
-    const index = state.visibleRows.findIndex((item) => item.path === node.path);
-    state.selectedPaths.clear();
-    state.selectedPaths.add(node.path);
-    state.lastSelectedIndex = index;
-    updateTreeSelectionHighlight();
-    previewFileDirectly(node, { fullView: false }).catch(showOperationError);
-  });
+    content.append(nameEl);
 
-  nodeEl.append(row);
-  state.visibleRows.push(node);
+    if (node.type === "folder" && node.children) {
+      const metaEl = document.createElement("span");
+      metaEl.className = "tree-meta";
+      metaEl.textContent = `(${node.children.length})`;
+      content.append(metaEl);
+    }
 
-  if (node.type === "folder" && node.children?.length && !collapsed) {
-    const children = document.createElement("div");
-    children.className = "tree-children";
-    node.children.forEach((child) => renderTreeNode(child, children));
-    nodeEl.append(children);
+    row.append(content);
+    row.addEventListener("contextmenu", ((n) => (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      showFileContextMenu(event.clientX, event.clientY, {
+        path: n.path,
+        isDir: n.type === "folder",
+        ext: n.extension || "",
+      });
+    })(node));
+
+    row.addEventListener("click", ((n, el) => (event) => {
+      event.stopPropagation();
+      if (n.type === "folder") {
+        const wasCollapsed = state.collapsedFolders.has(n.path);
+        if (wasCollapsed && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
+          toggleFolderNode(n, el);
+        }
+        selectNode(n, event);
+        return;
+      }
+      selectNode(n, event);
+    })(node, nodeEl));
+
+    row.addEventListener("dblclick", ((n) => (event) => {
+      event.stopPropagation();
+      if (n.type === "folder") {
+        toggleFolderNode(n, nodeEl);
+        return;
+      }
+      const index = state.visibleRows.findIndex((item) => item.path === n.path);
+      state.selectedPaths.clear();
+      state.selectedPaths.add(n.path);
+      state.lastSelectedIndex = index;
+      updateTreeSelectionHighlight();
+      previewFileDirectly(n, { fullView: false }).catch(showOperationError);
+    })(node));
+
+    nodeEl.append(row);
+    state.visibleRows.push(node);
+
+    if (node.type === "folder" && node.children?.length && !collapsed) {
+      const children = document.createElement("div");
+      children.className = "tree-children";
+      nodeEl.append(children);
+      // Дочерние элементы добавляем в стек в обратном порядке,
+      // чтобы при извлечении из стека порядок остался правильным
+      for (let i = node.children.length - 1; i >= 0; i--) {
+        stack.push({ node: node.children[i], parent: children });
+      }
+    }
+
+    parent.append(nodeEl);
   }
-
-  parent.append(nodeEl);
 }
 
 function renderFormats() {

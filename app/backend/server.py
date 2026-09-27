@@ -133,10 +133,14 @@ def build_tree(folder: Path) -> tuple[dict, dict[str, int], int, int]:
     file_count = 0
     visited_dirs: set[Path] = set()
 
-    def walk(current: Path) -> dict:
-        nonlocal folder_count, file_count
+    # Итеративный обход: стек хранит (path, parent_children_list).
+    # Каждый каталог создаёт узел и кладёт своих потомков-каталогов в стек.
+    root_node: dict = {"type": "folder", "name": folder.name, "path": str(folder), "children": []}
+    stack: list[tuple[Path, list]] = [(folder, root_node["children"])]
+
+    while stack:
+        current, parent_children = stack.pop()
         folder_count += 1
-        children = []
         try:
             resolved_current = current.resolve()
             if resolved_current in visited_dirs:
@@ -149,21 +153,30 @@ def build_tree(folder: Path) -> tuple[dict, dict[str, int], int, int]:
             visited_dirs.add(resolved_current)
             entries = sorted(current.iterdir(), key=lambda item: (not item.is_dir(), item.name.casefold()))
         except OSError as error:
-            return {
-                "type": "folder",
-                "name": current.name,
-                "path": str(current),
-                "error": str(error),
-                "children": [],
-            }
+            # Ошибка чтения каталога — добавляем узел с ошибкой
+            if current != folder:
+                parent_children.append({
+                    "type": "folder",
+                    "name": current.name,
+                    "path": str(current),
+                    "error": str(error),
+                    "children": [],
+                })
+            else:
+                root_node["error"] = str(error)
+            continue
 
+        # Собираем дочерние узлы для текущего каталога
+        children_dirs_to_push: list[tuple[Path, list]] = []
         for entry in entries:
             if entry.name.startswith("~$") or entry.name.startswith(".~"):
                 continue
             if entry.is_dir():
                 if entry.name in SKIP_DIR_NAMES:
                     continue
-                children.append(walk(entry))
+                child_node: dict = {"type": "folder", "name": entry.name, "path": str(entry), "children": []}
+                parent_children.append(child_node)
+                children_dirs_to_push.append((entry, child_node["children"]))
             elif entry.is_file():
                 ext = file_extension(entry)
                 counts[ext] = counts.get(ext, 0) + 1
@@ -187,17 +200,23 @@ def build_tree(folder: Path) -> tuple[dict, dict[str, int], int, int]:
                 }
                 if stat_error:
                     node["error"] = stat_error
-                children.append(node)
+                parent_children.append(node)
 
-        return {"type": "folder", "name": current.name, "path": str(current), "children": children}
+        # Добавляем подкаталоги в стек в обратном порядке для сохранения
+        # порядка обхода (первый каталог будет обработан следующим)
+        for item in reversed(children_dirs_to_push):
+            stack.append(item)
 
-    return walk(folder), counts, folder_count, file_count
+    return root_node, counts, folder_count, file_count
 
 
 def tree_file_signatures(tree: dict | None) -> dict[str, dict]:
     result: dict[str, dict] = {}
-
-    def walk(node: dict) -> None:
+    if not tree:
+        return result
+    stack = [tree]
+    while stack:
+        node = stack.pop()
         if node.get("type") == "file":
             path = node.get("path") or ""
             result[path.casefold()] = {
@@ -207,10 +226,7 @@ def tree_file_signatures(tree: dict | None) -> dict[str, dict]:
                 "mtimeNs": node.get("mtimeNs"),
             }
         for child in node.get("children") or []:
-            walk(child)
-
-    if tree:
-        walk(tree)
+            stack.append(child)
     return result
 
 
@@ -314,29 +330,32 @@ def manifest_path(object_id: str) -> Path:
 def validate_and_filter_tree(node: dict) -> dict:
     if not isinstance(node, dict):
         return node
-    node_path = node.get("path") or ""
-    if not os.path.exists(node_path):
-        node["is_missing"] = True
-        node["error"] = "Путь недоступен на диске"
-        if node.get("type") == "folder":
-            node["children"] = []
-        return node
+    # Итеративная валидация: обрабатываем все папки через стек
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if not isinstance(current, dict):
+            continue
+        cur_path = current.get("path") or ""
+        if not os.path.exists(cur_path):
+            current["is_missing"] = True
+            current["error"] = "Путь недоступен на диске"
+            if current.get("type") == "folder":
+                current["children"] = []
+            continue
 
-    if node.get("type") == "folder":
-        valid_children = []
-        for child in node.get("children", []):
-            if not isinstance(child, dict):
-                continue
-            c_path = child.get("path") or ""
-            if not os.path.exists(c_path):
-                # Файл физически удален или диск недоступен: исключаем мертвую запись
-                continue
-            if child.get("type") == "folder":
-                valid_children.append(validate_and_filter_tree(child))
-            else:
+        if current.get("type") == "folder":
+            valid_children = []
+            for child in current.get("children", []):
+                if not isinstance(child, dict):
+                    continue
+                c_path = child.get("path") or ""
+                if not os.path.exists(c_path):
+                    continue
                 valid_children.append(child)
-        node["children"] = valid_children
-        return node
+                if child.get("type") == "folder":
+                    stack.append(child)
+            current["children"] = valid_children
     return node
 
 
@@ -345,20 +364,20 @@ def calculate_tree_statistics(tree: dict) -> dict:
     folder_count = 0
     file_count = 0
 
-    def walk(n: dict) -> None:
-        nonlocal folder_count, file_count
+    stack = [tree]
+    while stack:
+        n = stack.pop()
         if not isinstance(n, dict):
-            return
+            continue
         if n.get("type") == "folder":
             folder_count += 1
             for child in n.get("children", []):
-                walk(child)
+                stack.append(child)
         elif n.get("type") == "file":
             file_count += 1
             ext = (n.get("extension") or file_extension(Path(n.get("path", "")))).upper()
             counts[ext] = counts.get(ext, 0) + 1
 
-    walk(tree)
     return {
         "folders": folder_count,
         "files": file_count,
