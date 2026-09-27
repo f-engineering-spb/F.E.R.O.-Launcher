@@ -175,12 +175,68 @@ def assign_process_to_job(proc) -> bool:
     return False
 
 
+def hidden_process_kwargs() -> dict:
+    """Флаги скрытого запуска процессов: никаких чёрных окон консоли."""
+    kwargs = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0  # SW_HIDE
+        kwargs["startupinfo"] = si
+    return kwargs
+
+
+def kill_process_tree_silent(pid: int) -> None:
+    """Завершить процесс и его потомков абсолютно тихо, без консольных утилит."""
+    if not pid:
+        return
+    # 1. Попытка через psutil (быстро, нативно, в памяти процесса)
+    try:
+        import psutil
+        parent = psutil.Process(pid)
+        for child in parent.children(recursive=True):
+            try:
+                child.kill()
+            except Exception:
+                pass
+        parent.kill()
+        return
+    except Exception:
+        pass
+
+    # 2. Попытка через Win32 TerminateProcess API (без внешних процессов и окон)
+    if os.name == "nt":
+        try:
+            k32 = ctypes.windll.kernel32
+            handle = k32.OpenProcess(0x0001, False, int(pid))  # PROCESS_TERMINATE = 1
+            if handle:
+                k32.TerminateProcess(handle, 1)
+                k32.CloseHandle(handle)
+                return
+        except Exception:
+            pass
+
+    # 3. Резерв: taskkill со скрытием окна
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                capture_output=True,
+                timeout=5,
+                **hidden_process_kwargs(),
+            )
+        except Exception:
+            pass
+
+
 def get_pids_on_port(port: int) -> set[int]:
     pids = set()
     try:
         out = subprocess.run(
             ["netstat", "-ano", "-p", "TCP"],
             capture_output=True, text=True, timeout=5,
+            **hidden_process_kwargs(),
         ).stdout
         for line in (out or "").splitlines():
             parts = line.split()
@@ -194,22 +250,16 @@ def get_pids_on_port(port: int) -> set[int]:
 
 
 def shutdown_server(proc, port: int | None = None) -> None:
-    # 1. Завершаем серверный процесс и его дерево процессов
+    # 1. Завершаем серверный процесс и его дерево процессов без вызова консольных утилит
     if proc:
         try:
             if proc.poll() is None:
                 log(f"Shutting down server pid {proc.pid}...")
-                if os.name == "nt":
-                    try:
-                        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, timeout=5)
-                    except Exception:
-                        pass
-                proc.terminate()
+                kill_process_tree_silent(proc.pid)
                 try:
-                    proc.wait(timeout=1.5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
                     proc.wait(timeout=1.0)
+                except Exception:
+                    pass
                 log(f"Server pid {proc.pid} stopped successfully")
         except Exception as e:
             log(f"Error during shutdown_server proc: {e}")
@@ -219,15 +269,19 @@ def shutdown_server(proc, port: int | None = None) -> None:
         for pid in get_pids_on_port(port):
             try:
                 log(f"Killing listener process pid {pid} on port {port}...")
-                if os.name == "nt":
-                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, timeout=5)
+                kill_process_tree_silent(pid)
             except Exception:
                 pass
 
     # 3. Гарантированно зачищаем любые осиротевшие невидимые фоновые сессии AutoCAD без окон
     if os.name == "nt":
         try:
-            subprocess.run(["taskkill", "/F", "/FI", "WINDOWTITLE eq ", "/IM", "acad.exe"], capture_output=True, timeout=5)
+            subprocess.run(
+                ["taskkill", "/F", "/FI", "WINDOWTITLE eq ", "/IM", "acad.exe"],
+                capture_output=True,
+                timeout=5,
+                **hidden_process_kwargs(),
+            )
         except Exception:
             pass
 
@@ -273,6 +327,7 @@ def reap_stale_server(port: int) -> None:
         out = subprocess.run(
             ["netstat", "-ano", "-p", "TCP"],
             capture_output=True, text=True, timeout=10,
+            **hidden_process_kwargs(),
         ).stdout
     except Exception:
         return
@@ -285,16 +340,8 @@ def reap_stale_server(port: int) -> None:
                 pids.add(parts[4])
     for pid in pids:
         try:
-            ps = subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
-                 "(Get-CimInstance Win32_Process -Filter \"ProcessId=%s\").CommandLine" % pid],
-                capture_output=True, text=True, timeout=15,
-            )
-            cmd = (ps.stdout or "").lower()
-            if "server.py" in cmd and ("launcher" in cmd or "codex" in cmd or "app" in cmd):
-                subprocess.run(["taskkill", "/F", "/PID", pid],
-                               capture_output=True, timeout=15)
-                log(f"Reaped stale launcher server pid {pid} on port {port}")
+            kill_process_tree_silent(int(pid))
+            log(f"Reaped stale launcher server pid {pid} on port {port}")
         except Exception:
             pass
 
@@ -331,20 +378,14 @@ def find_or_start_server() -> tuple[int, subprocess.Popen | None]:
         target_port = 8780
 
     log(f"Starting backend on port {target_port}")
-    creationflags = 0
-    if os.name == "nt":
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-
-    # Запускаем server.py: встроенный runtime/python/pythonw.exe в приоритете,
-    # иначе — текущий интерпретатор (в frozen — pythonw/python из PATH).
-    # Консоль сервера не всплывает (CREATE_NO_WINDOW).
+    # Запускаем server.py скрыто: никаких чёрных окон консоли
     python_exe = _backend_python()
     server_proc = subprocess.Popen(
         [python_exe, BACKEND, "--port", str(target_port)],
         cwd=REPO_ROOT,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        creationflags=creationflags,
+        **hidden_process_kwargs(),
     )
 
     # Привязываем дочерний процесс сервера к Windows Job Object с авто-завершением
@@ -384,7 +425,10 @@ def open_browser_window(url: str) -> None:
         if os.path.exists(p):
             profile = os.path.join(os.environ.get("LOCALAPPDATA", ""), "FEngineeringLauncher", "AppProfile")
             os.makedirs(profile, exist_ok=True)
-            subprocess.Popen([p, f"--app={url}", f"--user-data-dir={profile}", "--no-first-run", "--start-maximized"])
+            subprocess.Popen(
+                [p, f"--app={url}", f"--user-data-dir={profile}", "--no-first-run", "--start-maximized"],
+                **hidden_process_kwargs(),
+            )
             return
 
     import webbrowser
@@ -408,18 +452,15 @@ def main():
     opened_webview = False
     try:
         import webview
-        log(f"Opening pywebview window at {url}")
-        window = webview.create_window(TITLE, url, width=1400, height=900)
-        try:
-            # Разворачиваем окно на весь экран сразу после загрузки страницы.
-            def _maximize_on_load(*args, **kwargs):
-                try:
-                    window.maximize()
-                except Exception as e:
-                    log(f"maximize failed: {e}")
-            window.events.loaded += _maximize_on_load
-        except Exception as e:
-            log(f"Could not bind maximize on load: {e}")
+        log(f"Opening pywebview window at {url} (maximized)")
+        # maximized=True: окно создаётся сразу на весь экран без промежуточного маленького окна
+        window = webview.create_window(
+            TITLE,
+            url,
+            maximized=True,
+            min_size=(1024, 700),
+            background_color='#0f172a',
+        )
 
         # Гарантированное завершение сервера при закрытии окна
         try:

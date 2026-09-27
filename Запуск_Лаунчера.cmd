@@ -5,8 +5,6 @@ cd /d "%~dp0"
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
 
-:: Очистка зависших невидимых фоновых процессов AutoCAD без окон
-taskkill /F /FI "WINDOWTITLE eq " /IM acad.exe 2>nul
 
 :: 1. Автономный портативный Python (внутри перенесенной папки или на флешке)
 if exist "%~dp0runtime\python\pythonw.exe" (
