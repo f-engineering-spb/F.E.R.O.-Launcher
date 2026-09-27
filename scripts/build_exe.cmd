@@ -19,6 +19,7 @@ if %ERRORLEVEL% EQU 0 (
     dir "dist\FEngineeringLauncher\FEngineeringLauncher.exe"
     echo [INFO] Mirror data for frozen mode...
     if exist "version.json" copy /Y "version.json" "dist\FEngineeringLauncher\" >nul
+    if exist "app" xcopy /E /I /Q /Y "app" "dist\FEngineeringLauncher\app" >nul
     if exist "scripts" xcopy /E /I /Q /Y "scripts" "dist\FEngineeringLauncher\scripts" >nul
     if exist "runtime\manifests\*.json" xcopy /Q /Y "runtime\manifests\*.json" "dist\FEngineeringLauncher\runtime\manifests\" >nul
 ) else (
