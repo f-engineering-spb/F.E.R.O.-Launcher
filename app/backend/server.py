@@ -39,6 +39,11 @@ else:
         REPO_ROOT = Path(*p.parts[:idx])
     else:
         REPO_ROOT = p.parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+_backend_dir = str(Path(__file__).resolve().parent)
+if _backend_dir not in sys.path:
+    sys.path.insert(0, _backend_dir)
 RUNTIME_DIR = REPO_ROOT / "runtime"
 MANIFESTS_DIR = RUNTIME_DIR / "manifests"
 FRONTEND_DIR = REPO_ROOT / "app" / "frontend"
@@ -1054,7 +1059,10 @@ def dwg_to_model_pdf(path: Path) -> tuple[Path, bool]:
             raise RuntimeError("CAD-система (AutoCAD) не создала PDF-файл для чертежа")
     except Exception as cad_err:
         try:
-            from app.backend.dwg_engine import extract_raw_thumbnail_from_dwg, _generate_placeholder_png
+            try:
+                from app.backend.dwg_engine import extract_raw_thumbnail_from_dwg, _generate_placeholder_png
+            except ImportError:
+                from dwg_engine import extract_raw_thumbnail_from_dwg, _generate_placeholder_png
             thumb = extract_raw_thumbnail_from_dwg(path)
             img_bytes = thumb[0] if thumb else _generate_placeholder_png(path.name, "Model")
 
@@ -2847,7 +2855,10 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 if not target.exists() or not target.is_file():
                     self.send_error(HTTPStatus.NOT_FOUND, "File not found")
                     return
-                from app.backend.dwg_engine import extract_raw_thumbnail_from_dwg, _generate_placeholder_png
+                try:
+                    from app.backend.dwg_engine import extract_raw_thumbnail_from_dwg, _generate_placeholder_png
+                except ImportError:
+                    from dwg_engine import extract_raw_thumbnail_from_dwg, _generate_placeholder_png
                 thumb = extract_raw_thumbnail_from_dwg(target)
                 body = thumb[0] if thumb else _generate_placeholder_png(target.name, "Model")
                 self.send_response(HTTPStatus.OK)
