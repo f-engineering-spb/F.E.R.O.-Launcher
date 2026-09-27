@@ -1,0 +1,17 @@
+{
+  "task_id": "TASK-DWG-001-EXPORT-AND-RENDER",
+  "title": "Улучшение рендера DWG и реализация экспорта в единый PDF и по листам",
+  "status": "PENDING",
+  "priority": "HIGH",
+  "scope": {
+    "viewer_render": "Оптимизация рендеринга листов DWG -> PDF -> PNG без искажений штампов",
+    "export_all_in_one": "Генерация полного альбома [Имя]_Полный_комплект.pdf (Model + Layouts)",
+    "export_split_sheets": "Пакетная нарезка листов в отдельные файлы: 01_[Имя_Листа].pdf, 02_[Имя_Листа].pdf"
+  },
+  "requirements": [
+    "Использовать скрипты PowerShell COM-плоттера DWG To PDF.pc3",
+    "Нарезать и склеивать PDF через PyMuPDF (fitz)",
+    "Сохранять исходные имена Layouts из AutoCAD при нарезке",
+    "Добавить эндпоинты в server.py: POST /api/dwg/export/all и POST /api/dwg/export/sheets"
+  ]
+}
