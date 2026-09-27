@@ -769,23 +769,32 @@ function pairFingerprint(name = "") {
 }
 
 function buildPdfPairIndex(nodes) {
-  const list = nodes
-    .filter((node) => node.type === "file" && node.extension === "PDF")
-    .map((node) => ({
-      node,
-      fingerprint: pairFingerprint(node.name),
-    }));
-  // Карта точных имён для мгновенного сопоставления O(1).
-  // Свойство на массиве: for..of, length и Array.isArray не страдают.
-  // Одно имя — список кандидатов: пары обычно лежат в соседней папке PDF,
-  // а не рядом с DWG, и одно имя может встречаться в нескольких местах.
-  // Выбор среди тёзок — по зеркальности путей (ниже).
+  const list = [];
   const byName = new Map();
-  for (const entry of list) {
-    const key = entry.fingerprint?.normalizedName;
-    if (!key) continue;
-    if (!byName.has(key)) byName.set(key, []);
-    byName.get(key).push(entry);
+  for (const node of nodes) {
+    if (node.type === "file" && node.extension === "PDF") {
+      const normalizedName = normalizePairName(node.name || "");
+      const entry = {
+        node,
+        normalizedName,
+        _fingerprint: null,
+        get fingerprint() {
+          if (!this._fingerprint) {
+            this._fingerprint = pairFingerprint(this.node.name);
+          }
+          return this._fingerprint;
+        },
+      };
+      list.push(entry);
+      if (normalizedName) {
+        let arr = byName.get(normalizedName);
+        if (!arr) {
+          arr = [];
+          byName.set(normalizedName, arr);
+        }
+        arr.push(entry);
+      }
+    }
   }
   list.byName = byName;
   return list;

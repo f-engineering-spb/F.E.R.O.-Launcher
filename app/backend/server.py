@@ -361,20 +361,9 @@ def load_manifest(object_id: str) -> dict | None:
     if not path.exists():
         return None
     try:
-        manifest = json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-
-    root_path = manifest.get("rootPath", "")
-    if not root_path or not os.path.exists(root_path):
-        return None
-
-    tree = manifest.get("tree")
-    if tree:
-        manifest["tree"] = validate_and_filter_tree(tree)
-        manifest["statistics"] = calculate_tree_statistics(manifest["tree"])
-
-    return manifest
 
 
 def manifest_summary(manifest: dict) -> dict:
@@ -393,14 +382,6 @@ def list_object_summaries() -> list[dict]:
     for path in MANIFESTS_DIR.glob("*.json"):
         try:
             manifest = json.loads(path.read_text(encoding="utf-8"))
-            root_path = manifest.get("rootPath", "")
-            # Исключаем мертвые призрачные записи с несуществующими корнями (отключенные диски, удаленные папки)
-            if not root_path or not os.path.exists(root_path):
-                continue
-            tree = manifest.get("tree")
-            if tree:
-                validated_tree = validate_and_filter_tree(tree)
-                manifest["statistics"] = calculate_tree_statistics(validated_tree)
             manifests.append(manifest_summary(manifest))
         except (OSError, json.JSONDecodeError):
             continue
