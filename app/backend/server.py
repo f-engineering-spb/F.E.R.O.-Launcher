@@ -1487,12 +1487,12 @@ def _clean_configured_exe_path(raw: str) -> str:
     if not raw:
         return ""
     raw = raw.strip()
-    m = re.match(r'^"([^"]+\.exe)"', raw, re.IGNORECASE)
+    m = re.match(r'^"([^"]+\\.exe)"', raw, re.IGNORECASE)
     if m:
         cand = m.group(1)
         if Path(cand).is_file():
             return str(Path(cand).resolve())
-    m2 = re.match(r'^([a-zA-Z]:\\S+\.exe)', raw, re.IGNORECASE)
+    m2 = re.match(r'^([a-zA-Z]:\\\S+\\.exe)', raw, re.IGNORECASE)
     if m2:
         cand = m2.group(1)
         if Path(cand).is_file():
@@ -1508,13 +1508,61 @@ def _clean_configured_exe_path(raw: str) -> str:
     return ""
 
 
+def _detect_via_assoc_query_win32(ext: str) -> str:
+    """Вызов нативного Windows API AssocQueryStringW (точный системный механизм Explorer)."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        shlwapi = getattr(ctypes.windll, "shlwapi", None)
+        if not shlwapi:
+            return ""
+        AssocQueryStringW = getattr(shlwapi, "AssocQueryStringW", None)
+        if not AssocQueryStringW:
+            return ""
+        AssocQueryStringW.argtypes = [
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPCWSTR,
+            wintypes.LPCWSTR,
+            wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        AssocQueryStringW.restype = wintypes.DWORD
+
+        ASSOCSTR_EXECUTABLE = 2
+        ASSOCSTR_COMMAND = 1
+        ASSOCF_NOTRUNCATE = 0x00000020
+
+        for str_type in (ASSOCSTR_EXECUTABLE, ASSOCSTR_COMMAND):
+            cch = wintypes.DWORD(2048)
+            buf = ctypes.create_unicode_buffer(2048)
+            hr = AssocQueryStringW(
+                ASSOCF_NOTRUNCATE,
+                str_type,
+                ext,
+                "open",
+                buf,
+                ctypes.byref(cch),
+            )
+            if hr == 0 and buf.value:
+                cand = buf.value.strip()
+                if cand.lower().endswith(".exe") and Path(cand).is_file():
+                    return str(Path(cand).resolve())
+                cleaned = _clean_configured_exe_path(cand)
+                if cleaned:
+                    return cleaned
+    except Exception:
+        pass
+    return ""
+
+
 def _get_command_from_progid(progid: str) -> str:
     if not winreg or not progid:
         return ""
     keys_to_try = [
-        f"{progid}\\shell\\open\\command",
-        f"{progid}\\shell\\Open\\command",
-        f"{progid}\\shell\\edit\\command",
+        f"{progid}\\\\shell\\\\open\\\\command",
+        f"{progid}\\\\shell\\\\Open\\\\command",
+        f"{progid}\\\\shell\\\\edit\\\\command",
     ]
     for subkey in keys_to_try:
         try:
@@ -1530,83 +1578,216 @@ def _get_command_from_progid(progid: str) -> str:
 
 def detect_windows_app_for_ext(ext: str) -> str:
     """Определяет установленную в Windows программу по умолчанию для расширения."""
-    if not winreg:
-        return ""
     ext = ext.lower().strip()
     if not ext.startswith("."):
         ext = "." + ext
 
-    # 1. UserChoice (Windows 10 / 11 modern default)
-    user_choice = f"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\{ext}\\UserChoice"
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, user_choice) as k:
-            progid, _ = winreg.QueryValueEx(k, "ProgId")
-            res = _get_command_from_progid(progid)
-            if res:
-                return res
-    except OSError:
-        pass
+    # 1. Точный системный вызов Windows API AssocQueryStringW
+    res = _detect_via_assoc_query_win32(ext)
+    if res:
+        return res
 
-    # 2. HKEY_CLASSES_ROOT default ProgID
-    try:
-        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, ext) as k:
-            progid = winreg.QueryValue(k, "")
-            res = _get_command_from_progid(progid)
-            if res:
-                return res
-    except OSError:
-        pass
+    # 2. Опрос реестра Windows (UserChoice - Windows 10/11)
+    if winreg:
+        user_choice = f"Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Explorer\\\\FileExts\\\\{ext}\\\\UserChoice"
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, user_choice) as k:
+                progid, _ = winreg.QueryValueEx(k, "ProgId")
+                res = _get_command_from_progid(progid)
+                if res:
+                    return res
+        except OSError:
+            pass
 
-    # 3. OpenWithProgids
-    openwith = f"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\{ext}\\OpenWithProgids"
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, openwith) as k:
-            i = 0
-            while True:
-                try:
-                    name, _, _ = winreg.EnumValue(k, i)
-                    res = _get_command_from_progid(name)
-                    if res:
-                        return res
-                    i += 1
-                except OSError:
-                    break
-    except OSError:
-        pass
+        # 3. HKEY_CLASSES_ROOT default ProgID
+        try:
+            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, ext) as k:
+                progid = winreg.QueryValue(k, "")
+                res = _get_command_from_progid(progid)
+                if res:
+                    return res
+        except OSError:
+            pass
 
-    # 4. Applications subkey in OpenWithList
-    try:
-        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, f"{ext}\\OpenWithList") as k:
-            i = 0
-            while True:
-                try:
-                    subk_name = winreg.EnumKey(k, i)
-                    app_key = f"Applications\\{subk_name}\\shell\\open\\command"
+        # 4. OpenWithProgids
+        openwith = f"Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Explorer\\\\FileExts\\\\{ext}\\\\OpenWithProgids"
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, openwith) as k:
+                i = 0
+                while True:
                     try:
-                        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, app_key) as ak:
-                            val, _ = winreg.QueryValueEx(ak, "")
-                            cleaned = _clean_configured_exe_path(val)
-                            if cleaned:
-                                return cleaned
+                        name, _, _ = winreg.EnumValue(k, i)
+                        res = _get_command_from_progid(name)
+                        if res:
+                            return res
+                        i += 1
                     except OSError:
-                        pass
-                    i += 1
-                except OSError:
-                    break
-    except OSError:
-        pass
+                        break
+        except OSError:
+            pass
+
+        # 5. OpenWithList -> Applications
+        try:
+            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, f"{ext}\\\\OpenWithList") as k:
+                i = 0
+                while True:
+                    try:
+                        subk_name = winreg.EnumKey(k, i)
+                        app_key = f"Applications\\\\{subk_name}\\\\shell\\\\open\\\\command"
+                        try:
+                            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, app_key) as ak:
+                                val, _ = winreg.QueryValueEx(ak, "")
+                                cleaned = _clean_configured_exe_path(val)
+                                if cleaned:
+                                    return cleaned
+                        except OSError:
+                            pass
+                        i += 1
+                    except OSError:
+                        break
+        except OSError:
+            pass
 
     return ""
 
 
+# Стандартные пути к популярным САПР, Офису и просмотрщикам на случай «голых» ассоциаций
+FALLBACK_APP_CANDIDATES: dict[str, list[str]] = {
+    ".dwg": [
+        r"C:\\Program Files\\Autodesk\\AutoCAD 2026\\acad.exe",
+        r"C:\\Program Files\\Autodesk\\AutoCAD 2025\\acad.exe",
+        r"C:\\Program Files\\Autodesk\\AutoCAD 2024\\acad.exe",
+        r"C:\\Program Files\\Autodesk\\AutoCAD 2023\\acad.exe",
+        r"C:\\Program Files\\Autodesk\\AutoCAD 2022\\acad.exe",
+        r"C:\\Program Files\\Autodesk\\AutoCAD 2021\\acad.exe",
+        r"C:\\Program Files\\Autodesk\\DWG TrueView 2026 - English\\dwgviewr.exe",
+        r"C:\\Program Files\\Autodesk\\DWG TrueView 2025 - English\\dwgviewr.exe",
+        r"C:\\Program Files\\Autodesk\\DWG TrueView 2024 - English\\dwgviewr.exe",
+        r"C:\\Program Files\\Nanosoft\\nanoCAD x64 24.0\\nacad.exe",
+        r"C:\\Program Files\\Nanosoft\\nanoCAD x64 23.0\\nacad.exe",
+        r"C:\\Program Files\\Nanosoft\\nanoCAD x64 22.0\\nacad.exe",
+        r"C:\\Program Files\\Nanosoft\\nanoCAD x64 21.0\\nacad.exe",
+        r"C:\\Program Files (x86)\\Nanosoft\\nanoCAD 5.1\\nacad.exe",
+    ],
+    ".dxf": [
+        r"C:\\Program Files\\Autodesk\\AutoCAD 2026\\acad.exe",
+        r"C:\\Program Files\\Autodesk\\AutoCAD 2025\\acad.exe",
+        r"C:\\Program Files\\Autodesk\\AutoCAD 2024\\acad.exe",
+        r"C:\\Program Files\\Autodesk\\DWG TrueView 2025 - English\\dwgviewr.exe",
+        r"C:\\Program Files\\Nanosoft\\nanoCAD x64 24.0\\nacad.exe",
+    ],
+    ".pdf": [
+        r"C:\\Program Files\\Adobe\\Acrobat DC\\Acrobat\\Acrobat.exe",
+        r"C:\\Program Files (x86)\\Adobe\\Acrobat Reader DC\\Reader\\AcroRd32.exe",
+        r"C:\\Program Files\\Adobe\\Acrobat Reader DC\\Reader\\AcroRd64.exe",
+        r"C:\\Program Files\\Foxit Software\\Foxit PDF Reader\\FoxitPDFReader.exe",
+        r"C:\\Program Files (x86)\\Foxit Software\\Foxit Reader\\FoxitReader.exe",
+        r"C:\\Program Files\\Tracker Software\\PDF Editor\\PDFXEdit.exe",
+        r"C:\\Program Files (x86)\\Tracker Software\\PDF Editor\\PDFXEdit.exe",
+        r"C:\\Program Files\\SumatraPDF\\SumatraPDF.exe",
+        r"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+        r"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    ],
+    ".docx": [
+        r"C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE",
+        r"C:\\Program Files (x86)\\Microsoft Office\\root\\Office16\\WINWORD.EXE",
+        r"C:\\Program Files\\Microsoft Office\\Office16\\WINWORD.EXE",
+        r"C:\\Program Files (x86)\\Microsoft Office\\Office16\\WINWORD.EXE",
+        r"C:\\Program Files\\Microsoft Office\\Office15\\WINWORD.EXE",
+        r"C:\\Program Files\\WPS Office\\ksolaunch.exe",
+        r"C:\\Program Files\\LibreOffice\\program\\soffice.exe",
+        r"C:\\Program Files\\Windows NT\\Accessories\\wordpad.exe",
+    ],
+    ".xlsx": [
+        r"C:\\Program Files\\Microsoft Office\\root\\Office16\\EXCEL.EXE",
+        r"C:\\Program Files (x86)\\Microsoft Office\\root\\Office16\\EXCEL.EXE",
+        r"C:\\Program Files\\Microsoft Office\\Office16\\EXCEL.EXE",
+        r"C:\\Program Files (x86)\\Microsoft Office\\Office16\\EXCEL.EXE",
+        r"C:\\Program Files\\Microsoft Office\\Office15\\EXCEL.EXE",
+        r"C:\\Program Files\\WPS Office\\ksolaunch.exe",
+        r"C:\\Program Files\\LibreOffice\\program\\soffice.exe",
+    ],
+    ".pptx": [
+        r"C:\\Program Files\\Microsoft Office\\root\\Office16\\POWERPNT.EXE",
+        r"C:\\Program Files (x86)\\Microsoft Office\\root\\Office16\\POWERPNT.EXE",
+        r"C:\\Program Files\\Microsoft Office\\Office16\\POWERPNT.EXE",
+        r"C:\\Program Files (x86)\\Microsoft Office\\Office16\\POWERPNT.EXE",
+        r"C:\\Program Files\\WPS Office\\ksolaunch.exe",
+        r"C:\\Program Files\\LibreOffice\\program\\soffice.exe",
+    ],
+    ".png": [
+        r"C:\\Windows\\System32\\mspaint.exe",
+        r"C:\\Windows\\mspaint.exe",
+    ],
+    ".zip": [
+        r"C:\\Program Files\\7-Zip\\7zFM.exe",
+        r"C:\\Program Files (x86)\\7-Zip\\7zFM.exe",
+        r"C:\\Program Files\\WinRAR\\WinRAR.exe",
+        r"C:\\Program Files (x86)\\WinRAR\\WinRAR.exe",
+    ],
+    ".txt": [
+        r"C:\\Windows\\System32\\notepad.exe",
+        r"C:\\Windows\\notepad.exe",
+        r"C:\\Program Files\\Notepad++\\notepad++.exe",
+        r"C:\\Program Files (x86)\\Notepad++\\notepad++.exe",
+    ],
+    ".mp4": [
+        r"C:\\Program Files\\VideoLAN\\VLC\\vlc.exe",
+        r"C:\\Program Files (x86)\\VideoLAN\\VLC\\vlc.exe",
+        r"C:\\Program Files\\K-Lite Codec Pack\\MPC-HC64\\mpc-hc64.exe",
+        r"C:\\Program Files (x86)\\K-Lite Codec Pack\\MPC-HC\\mpc-hc.exe",
+        r"C:\\Program Files\\Windows Media Player\\wmplayer.exe",
+        r"C:\\Program Files (x86)\\Windows Media Player\\wmplayer.exe",
+    ]
+}
+
+
 def detect_all_windows_default_apps() -> dict[str, str]:
-    """Сканирует реестр Windows для всех известных расширений лаунчера."""
+    """Сканирует систему Windows для всех известных расширений лаунчера."""
     results = {}
     for ext in DEFAULT_NATIVE_APPS:
         if ext.startswith("."):
             found = detect_windows_app_for_ext(ext)
+            if not found:
+                # Проверяем типовые пути установки
+                candidates = FALLBACK_APP_CANDIDATES.get(ext, [])
+                for cand in candidates:
+                    if Path(cand).is_file():
+                        found = str(Path(cand).resolve())
+                        break
             if found:
                 results[ext] = found
+
+    # Распространяем найденное на связанные форматы группы
+    if results.get(".docx") and not results.get(".doc"):
+        results[".doc"] = results[".docx"]
+        results[".rtf"] = results[".docx"]
+    if results.get(".doc") and not results.get(".docx"):
+        results[".docx"] = results[".doc"]
+    if results.get(".xlsx") and not results.get(".xls"):
+        results[".xls"] = results[".xlsx"]
+        results[".csv"] = results[".xlsx"]
+    if results.get(".pptx") and not results.get(".ppt"):
+        results[".ppt"] = results[".pptx"]
+    if results.get(".dwg") and not results.get(".dxf"):
+        results[".dxf"] = results[".dwg"]
+    if results.get(".png"):
+        for img_ext in (".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".ico", ".svg"):
+            if not results.get(img_ext):
+                results[img_ext] = results[".png"]
+    if results.get(".zip"):
+        for arch_ext in (".rar", ".7z", ".tar", ".gz"):
+            if not results.get(arch_ext):
+                results[arch_ext] = results[".zip"]
+    if results.get(".txt"):
+        for txt_ext in (".log", ".ini", ".cfg", ".json", ".xml", ".yaml", ".yml"):
+            if not results.get(txt_ext):
+                results[txt_ext] = results[".txt"]
+    if results.get(".mp4"):
+        for media_ext in (".avi", ".mov", ".mkv", ".mp3", ".wav"):
+            if not results.get(media_ext):
+                results[media_ext] = results[".mp4"]
+
     return results
 
 

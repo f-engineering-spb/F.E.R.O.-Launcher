@@ -4555,7 +4555,7 @@ async function autoDetectWindowsApps() {
   const prevText = btn ? btn.textContent : "";
   if (btn) {
     btn.disabled = true;
-    btn.textContent = "⏳ Опрос ассоциаций Windows...";
+    btn.textContent = "⏳ Опрос Windows...";
   }
   showToast("Определение программ по умолчанию в Windows...");
   try {
@@ -4569,11 +4569,10 @@ async function autoDetectWindowsApps() {
     const data = await res.json();
     const detected = data.detected || {};
     let filledCount = 0;
-    
-    // Подставляем найденные пути в поля ввода
+
     document.querySelectorAll("#settingsAppsForm .settings-input").forEach((input) => {
-      const exts = String(input.dataset.exts || "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
-      // Ищем первое совпадение среди расширений группы
+      const rawExts = String(input.dataset.exts || "").toLowerCase();
+      const exts = rawExts.split(",").map((e) => e.trim()).filter(Boolean);
       for (const ext of exts) {
         if (detected[ext]) {
           input.value = detected[ext];
@@ -4584,9 +4583,9 @@ async function autoDetectWindowsApps() {
     });
 
     if (filledCount > 0) {
-      showToast(`Успешно заполнено категорий: ${filledCount}. Нажмите «Сохранить»!`);
+      showToast(`Найдено и заполнено категорий: ${filledCount}. Нажмите «Сохранить»!`);
     } else {
-      showToast("В Windows не найдены явные файловые ассоциации или программы отсутствуют.");
+      showToast("В Windows не найдены пути к программам. Укажите их через кнопку «Обзор…».");
     }
   } catch (err) {
     showToast(`Ошибка автоопределения: ${err.message || err}`);
