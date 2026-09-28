@@ -171,8 +171,12 @@ try {
         )
         foreach ($dev in $preferredDevices) {
           if ($devices -contains $dev) {
-            $layout.ConfigName = $dev
-            $layout.RefreshPlotDeviceInfo()
+            try {
+              $layout.ConfigName = $dev
+              $layout.RefreshPlotDeviceInfo()
+            } catch {
+              Write-Output ("DEBUG: ConfigName {0} rejected, keeping stored device" -f $dev)
+            }
             break
           }
         }
@@ -191,16 +195,27 @@ try {
             }
           }
           if ($matched -and $matched.Count -gt 0) {
-            $layout.CanonicalMediaName = $matched[0]
+            try { $layout.CanonicalMediaName = $matched[0] } catch {
+              Write-Output "DEBUG: CanonicalMediaName rejected, keeping stored media"
+            }
           } elseif ($availableMedia -contains "ISO_full_bleed_A3_(420.00_x_297.00_MM)") {
-            $layout.CanonicalMediaName = "ISO_full_bleed_A3_(420.00_x_297.00_MM)"
+            try { $layout.CanonicalMediaName = "ISO_full_bleed_A3_(420.00_x_297.00_MM)" } catch {
+              Write-Output "DEBUG: CanonicalMediaName rejected, keeping stored media"
+            }
           } else {
-            $layout.CanonicalMediaName = $availableMedia[0]
+            try { $layout.CanonicalMediaName = $availableMedia[0] } catch {
+              Write-Output "DEBUG: CanonicalMediaName rejected, keeping stored media"
+            }
           }
         }
       }
 
-      $layout.PlotType = 4 # acLayout
+      try {
+        $layout.PlotType = 4 # acLayout
+      } catch {
+        # Если плоттер отвергает acLayout (4), продолжаем с текущим типом листа
+        Write-Output "DEBUG: PlotType 4 rejected, using default layout plot type"
+      }
       $layout.PlotWithLineweights = $true
       $layout.PlotWithPlotStyles = $true
 
@@ -232,20 +247,30 @@ try {
     )
     foreach ($dev in $preferredDevices) {
       if ($devices -contains $dev) {
-        $layout.ConfigName = $dev
-        $layout.RefreshPlotDeviceInfo()
+        try {
+          $layout.ConfigName = $dev
+          $layout.RefreshPlotDeviceInfo()
+        } catch {
+          Write-Output ("DEBUG: model ConfigName {0} rejected, keeping stored device" -f $dev)
+        }
         break
       }
     }
     $allMedia = @($layout.GetCanonicalMediaNames())
     $a0 = @($allMedia | Where-Object { $_ -match "A0" } | Select-Object -First 1)
     if ($a0.Count -gt 0) {
-      $layout.CanonicalMediaName = $a0[0]
+      try { $layout.CanonicalMediaName = $a0[0] } catch {
+        Write-Output "DEBUG: model CanonicalMediaName rejected, keeping stored media"
+      }
     } elseif ($allMedia.Count -gt 0) {
-      $layout.CanonicalMediaName = $allMedia[0]
+      try { $layout.CanonicalMediaName = $allMedia[0] } catch {
+        Write-Output "DEBUG: model CanonicalMediaName rejected, keeping stored media"
+      }
     }
 
-    $layout.PlotType = 1 # acExtents
+    try { $layout.PlotType = 1 } catch { # acExtents
+      Write-Output "DEBUG: model PlotType 1 rejected, using default plot type"
+    }
     $layout.CenterPlot = $true
     $layout.UseStandardScale = $true
     $layout.StandardScale = 0 # acScaleToFit
