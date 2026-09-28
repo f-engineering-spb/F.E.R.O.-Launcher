@@ -21,7 +21,6 @@
         <button id="scaleResetBtn" type="button" class="scale-btn scale-reset" title="Сбросить масштаб на 100%">100%</button>
         <button id="scalePlusBtn" type="button" class="scale-btn" title="Увеличить масштаб (дерево и миниатюры)">+</button>
       </div>
-      <button id="reloadPage" type="button" title="Перезагрузить страницу (помогает при зависании)">Обновить</button>
       <span id="app-version-badge" class="version-badge" title="Версия лаунчера">v...</span>
     </div>
     <div class="progress-panel" id="progressPanel" hidden>
@@ -132,7 +131,7 @@
             <iframe class="excel-sheet-frame" id="excelSheetFrame" title="Лист Excel" loading="lazy"></iframe>
           </section>
           <div class="viewer-controls" id="viewerControls" hidden>
-            <button id="viewOpenNative" type="button" class="viewer-open-btn" title="Открыть в программе по умолчанию">Открыть</button>
+            <button id="viewOpenNative" type="button" title="Открыть в программе по умолчанию">Открыть</button>
             <button id="viewZoomOut" type="button" title="Уменьшить">−</button>
             <button id="viewZoomIn" type="button" title="Увеличить">+</button>
             <button id="viewFit" type="button" title="Вписать страницу">Вписать</button>
@@ -168,10 +167,7 @@
         </div>
         <div class="settings-toolbar">
           <button type="button" class="settings-btn" id="settingsFillEmptyBtn" title="Найти ассоциации Windows и заполнить только пустые поля, не затрагивая существующие настройки">
-            ⚡ Заполнить пустые поля из Windows
-          </button>
-          <button type="button" class="settings-btn settings-btn-warning" id="settingsReplaceBtn" title="Заменить сохранённые приложения программами по умолчанию Windows (с подтверждением)">
-            🔄 Заменить сохранённые приложения данными Windows…
+            ⚡ Заполнить пустые поля из настроек Windows
           </button>
           <button type="button" class="settings-btn" id="settingsOpenWinSettingsBtn" title="Открыть раздел «Приложения по умолчанию» в параметрах Windows">
             ⚙ Открыть настройки приложений Windows
