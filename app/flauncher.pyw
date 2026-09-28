@@ -15,6 +15,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -405,6 +406,67 @@ def find_or_start_server() -> tuple[int, subprocess.Popen | None]:
     return target_port, server_proc
 
 
+READINESS_TIMEOUT_SECONDS = 25
+
+
+def fetch_json(url: str, timeout: float):
+    """GET JSON; raise on non-200 status or unparseable body."""
+    with urllib.request.urlopen(url, timeout=timeout) as resp:
+        if resp.status != 200:
+            raise RuntimeError(f"HTTP {resp.status} for {url}")
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def wait_for_objects_ready(base_url: str, timeout_seconds: float) -> tuple[bool, str]:
+    """Poll GET /api/objects until HTTP 200 with parsed JSON.
+
+    Bounded by timeout_seconds; polls the real condition (no fixed sleep
+    used as synchronization, only a short poll interval inside the loop).
+    """
+    deadline = time.time() + max(0.1, timeout_seconds)
+    last_error = "not attempted"
+    while True:
+        try:
+            data = fetch_json(base_url + "api/objects", timeout=5)
+            if isinstance(data, dict):
+                return True, f"objects ready ({len(data.get('items', []))} items)"
+            last_error = "unexpected payload (not a JSON object)"
+        except Exception as e:
+            last_error = f"{type(e).__name__}: {e}"
+        if time.time() >= deadline:
+            return False, last_error
+        time.sleep(0.3)
+
+
+def startup_error_html(reason: str) -> str:
+    safe = (reason or "unknown error")[:500]
+    safe = safe.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return (
+        "<!doctype html><html lang='ru'><head><meta charset='utf-8'>"
+        "<title>F-Engineering Launcher — ошибка запуска</title></head>"
+        "<body style='font-family:Segoe UI,sans-serif;background:#0f172a;color:#e2e8f0;padding:32px'>"
+        "<h2>Launcher не смог запуститься</h2>"
+        f"<p>Причина: {safe}</p>"
+        "<p>Проверьте backend (http://127.0.0.1:8780/api/health) и перезапустите ярлык.</p>"
+        "</body></html>"
+    )
+
+
+def show_startup_error(message: str) -> None:
+    """One small error window instead of an empty blue maximized frame."""
+    try:
+        import webview
+        webview.create_window(
+            TITLE + " — ошибка запуска",
+            html=startup_error_html(message),
+            width=620,
+            height=360,
+        )
+        webview.start()
+    except Exception as e:
+        log(f"startup error window failed: {e}")
+
+
 def focus_existing_window() -> bool:
     try:
         user32 = ctypes.windll.user32
@@ -438,49 +500,109 @@ def open_browser_window(url: str) -> None:
 
 
 def main():
+    readiness_deadline = time.time() + READINESS_TIMEOUT_SECONDS
     try:
         mutex = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         mutex.bind(("127.0.0.1", GUI_MUTEX_PORT))
     except OSError:
-        if focus_existing_window():
-            log("Focused existing window, exiting duplicate process")
-            return
+        # Fail-closed single instance: try to focus, then ALWAYS exit
+        # without starting backend or window — never spawn a second UI.
+        try:
+            if focus_existing_window():
+                log("Focused existing window, exiting duplicate process")
+            else:
+                log("Mutex busy and existing window could not be focused; exiting without backend/window")
+        except Exception:
+            pass
+        return
 
     port, server_proc = find_or_start_server()
     atexit.register(lambda: shutdown_server(server_proc, port))
 
-    url = f"http://127.0.0.1:{port}/"
+    base_url = f"http://127.0.0.1:{port}/"
 
-    opened_webview = False
+    # D1: objects readiness gate — no window exists yet.
+    remaining = max(0.1, readiness_deadline - time.time())
+    objects_ok, objects_detail = wait_for_objects_ready(base_url, remaining)
+    if not objects_ok:
+        log(f"Objects readiness failed: {objects_detail}")
+        shutdown_server(server_proc, port)
+        show_startup_error(f"objects endpoint failure: {objects_detail}")
+        return
+    log(f"Readiness: backend healthy, {objects_detail}")
+
+    # D2: hidden window — never shown before all gates pass. No fullscreen.
     try:
         import webview
-        log(f"Opening pywebview window at {url} (maximized)")
-        # maximized=True: окно создаётся сразу на весь экран без промежуточного маленького окна
-        window = webview.create_window(
-            TITLE,
-            url,
-            maximized=True,
-            min_size=(1024, 700),
-            background_color='#0f172a',
-        )
+    except Exception as e:
+        log(f"pywebview import failed: {e}, falling back to browser window")
+        open_browser_window(base_url)
+        return
 
-        # Гарантированное завершение сервера при закрытии окна
+    frontend_ready = threading.Event()
+    window = webview.create_window(
+        TITLE,
+        base_url,
+        hidden=True,
+        width=1400,
+        height=900,
+        min_size=(1024, 700),
+    )
+
+    # D3: official pywebview frontend-ready signal.
+    try:
+        def _on_frontend_loaded(*args, **kwargs):
+            frontend_ready.set()
+        window.events.loaded += _on_frontend_loaded
+    except Exception as e:
+        log(f"Could not bind loaded event: {e}")
+
+    # Гарантированное завершение сервера при закрытии окна
+    try:
+        def _on_window_closed(*args, **kwargs):
+            log("Window closed event received, stopping server...")
+            shutdown_server(server_proc, port)
+        window.events.closed += _on_window_closed
+    except Exception as e:
+        log(f"Could not bind on_closed event: {e}")
+
+    def _gatekeeper():
+        # Exactly one show(): ready path maximizes after the gate,
+        # timeout path shows the same window small with an error.
         try:
-            def _on_window_closed(*args, **kwargs):
-                log("Window closed event received, stopping server...")
-                shutdown_server(server_proc, port)
-            window.events.closed += _on_window_closed
+            remaining = max(0.1, readiness_deadline - time.time())
+            if frontend_ready.wait(timeout=remaining):
+                log("Readiness gates passed (health+objects+loaded); showing window once")
+                window.show()
+                try:
+                    window.maximize()
+                except Exception as e:
+                    log(f"maximize failed: {e}")
+            else:
+                reason = "frontend load timeout"
+                log(f"Readiness failed: {reason}")
+                try:
+                    window.resize(620, 360)
+                except Exception:
+                    pass
+                try:
+                    window.load_html(startup_error_html(reason))
+                except Exception as e:
+                    log(f"load_html failed: {e}")
+                window.show()
         except Exception as e:
-            log(f"Could not bind on_closed event: {e}")
+            log(f"gatekeeper failed: {e}")
 
-        opened_webview = True
+    gatekeeper = threading.Thread(target=_gatekeeper, daemon=True)
+    gatekeeper.start()
+    try:
         webview.start(icon=ICON if os.path.exists(ICON) else None)
-        # После выхода из webview.start() (окно закрыто)
-        shutdown_server(server_proc, port)
     except Exception as e:
         log(f"pywebview failed: {e}, falling back to browser window")
-        if not opened_webview:
-            open_browser_window(url)
+        open_browser_window(base_url)
+        return
+    # После выхода из webview.start() (окно закрыто)
+    shutdown_server(server_proc, port)
 
 
 if __name__ == "__main__":
