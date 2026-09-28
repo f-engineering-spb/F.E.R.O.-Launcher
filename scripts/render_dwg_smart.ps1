@@ -24,44 +24,23 @@ if (-not [string]::IsNullOrWhiteSpace($outputDir) -and -not (Test-Path -LiteralP
   } catch {}
 }
 
-# 1.                                         AutoCAD (accoreconsole.exe)       GUI                  
-$nativeExportScript = Join-Path $PSScriptRoot 'Invoke-NativeDwgPdfExport.ps1'
-if (Test-Path -LiteralPath $nativeExportScript) {
-  try {
-    . $nativeExportScript
-    $accore = Find-NativeAccoreConsole
-    if ($accore) {
-      $sessionGuid = [System.Guid]::NewGuid().ToString("N").Substring(0, 10)
-      $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) "FEng_dwg_native_$sessionGuid"
-      $targetPdf = if (-not [string]::IsNullOrWhiteSpace($OutputPath)) { $OutputPath } else { [System.IO.Path]::ChangeExtension($InputPath, ".pdf") }
-      $tempPdf = Join-Path $tempDir "native_export.pdf"
-      $r = Invoke-NativeDwgPdfExport -InputPath $InputPath -OutputPdf $tempPdf -WorkDir $tempDir -TimeoutSec 600
-      if ((Test-Path -LiteralPath $tempPdf) -and (Get-Item -LiteralPath $tempPdf).Length -gt 1024) {
-        $finalDestination = $targetPdf
-        try {
-          Copy-Item -LiteralPath $tempPdf -Destination $targetPdf -Force -ErrorAction Stop
-        } catch {
-          if (-not [string]::IsNullOrWhiteSpace($FallbackCachePath)) {
-            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $FallbackCachePath) | Out-Null
-            Copy-Item -LiteralPath $tempPdf -Destination $FallbackCachePath -Force
-            $finalDestination = $FallbackCachePath
-          }
-        }
-        Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
-        $res = @{
-          ok = $true
-          finalPath = $finalDestination
-          isLocalFolder = ($finalDestination -eq $targetPdf)
-          pageCount = 1
-          progId = "AutoCAD Core Console (native _.-EXPORT _PDF)"
-        }
-        Write-Output ($res | ConvertTo-Json -Compress)
-        exit 0
-      }
-    }
-  } catch {
-    #                                  ,                                  COM
+# 1. ПРИОРИТЕТ — штатный обход листов через AutoCAD COM (многостраничный экспорт).
+# Бывший безусловный вызов Invoke-NativeDwgPdfExport (_.-EXPORT _PDF _E, только
+# Model space, 1 страница) здесь ОТКЛЮЧЁН: он перехватывал выполнение до COM-печати
+# листов и давал одностраничный пустой PDF вместо всех листов чертежа.
+# Native-экспорт оставлен только как крайний fallback (см. ниже, после COM).
+
+# Python для склейки страниц: сервер передаёт -PythonExe, для ручного CLI-автоопределение.
+if ([string]::IsNullOrWhiteSpace($PythonExe)) {
+  foreach ($cmd in @("python", "pythonw", "py")) {
+    try {
+      $found = (Get-Command $cmd -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source)
+      if ($found) { $PythonExe = $found; break }
+    } catch {}
   }
+}
+if ([string]::IsNullOrWhiteSpace($PythonExe)) {
+  throw "Python interpreter not found: pass -PythonExe or install Python."
 }
 
 if (-not ([System.Management.Automation.PSTypeName]'LauncherMessageFilter').Type) {
@@ -151,15 +130,20 @@ try {
 $app.Visible = $false
 $document = $null
 
-$sessionGuid = [System.Guid]::NewGuid().ToString("N").Substring(0, 10)
-$tempDir = Join-Path ([System.IO.Path]::GetTempPath()) "FEng_dwg_render_$sessionGuid"
+# RESUME: детерминированная рабочая папка на основе MD5-хэша пути файла.
+# Повторный запуск подхватывает уже отпечатанные page_*.pdf и допечатывает остальное.
+$fileId = [System.BitConverter]::ToString([System.Security.Cryptography.MD5]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes($InputPath))).Replace("-","").Substring(0,12)
+$tempDir = Join-Path ([System.IO.Path]::GetTempPath()) "FEng_dwg_$fileId"
 New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
 
 try {
   #                   '             '
   $document = $app.Documents.Open($InputPath, $true)
+  # BENCH-WINNER (5.1s): freeze screen regen during batch plot, no per-sheet redraws.
+  $document.SetVariable("LAYOUTREGENCTL", 2)
+  $document.SetVariable("REGENMODE", 0)
   $document.SetVariable("BACKGROUNDPLOT", 0)
-  try { $document.SetVariable("EXPERT", 5) } catch {}
+  $document.SetVariable("EXPERT", 5)
 
   #                 (Layouts)
   $candidateLayouts = @($document.Layouts | Where-Object { -not $_.ModelType } | Sort-Object TabOrder)
@@ -167,25 +151,30 @@ try {
 
   $pagePdfPaths = [System.Collections.Generic.List[string]]::new()
 
+  Write-Output ("START layouts_total={0} layouts_nonempty={1} input={2}" -f $candidateLayouts.Count, $nonEmptyLayouts.Count, $InputPath)
+
   if ($nonEmptyLayouts.Count -gt 0) {
     #                       
     foreach ($layout in $nonEmptyLayouts) {
       $document.ActiveLayout = $layout
-      $layout.RefreshPlotDeviceInfo()
 
-      #                    PDF-        
+      # BENCH-WINNER: trust stored page setup; touch the plotter only if the
+      # current device is missing. No unconditional RefreshPlotDeviceInfo().
       $devices = @($layout.GetPlotDeviceNames())
-      $preferredDevices = @(
-        "DWG To PDF.pc3",
-        "AutoCAD PDF (General Documentation).pc3",
-        "AutoCAD PDF (High Quality Print).pc3",
-        "Microsoft Print to PDF"
-      )
-      foreach ($dev in $preferredDevices) {
-        if ($devices -contains $dev) {
-          $layout.ConfigName = $dev
-          $layout.RefreshPlotDeviceInfo()
-          break
+      $currentDevice = $layout.ConfigName
+      if (-not ($currentDevice -and ($devices -contains $currentDevice))) {
+        $preferredDevices = @(
+          "DWG To PDF.pc3",
+          "AutoCAD PDF (General Documentation).pc3",
+          "AutoCAD PDF (High Quality Print).pc3",
+          "Microsoft Print to PDF"
+        )
+        foreach ($dev in $preferredDevices) {
+          if ($devices -contains $dev) {
+            $layout.ConfigName = $dev
+            $layout.RefreshPlotDeviceInfo()
+            break
+          }
         }
       }
 
@@ -216,9 +205,16 @@ try {
       $layout.PlotWithPlotStyles = $true
 
       $pageFile = Join-Path $tempDir ("page_{0:D4}.pdf" -f $layout.TabOrder)
+      # RESUME: готовая страница из прошлого запуска — пропускаем печать, берём из кэша.
+      if ((Test-Path -LiteralPath $pageFile) -and (Get-Item -LiteralPath $pageFile).Length -gt 1024) {
+        Write-Output ("PAGE_EXISTS: {0} skipping render, using cached page" -f $layout.TabOrder)
+        $pagePdfPaths.Add($pageFile)
+        continue
+      }
       if ($document.Plot.PlotToFile($pageFile)) {
         if ((Test-Path -LiteralPath $pageFile) -and (Get-Item -LiteralPath $pageFile).Length -gt 1024) {
           $pagePdfPaths.Add($pageFile)
+          Write-Output ("PROGRESS layout={0} done={1}/{2} file={3}" -f $layout.TabOrder, $pagePdfPaths.Count, $nonEmptyLayouts.Count, [System.IO.Path]::GetFileName($pageFile))
         }
       }
     }
@@ -261,6 +257,25 @@ try {
       if ((Test-Path -LiteralPath $modelPageFile) -and (Get-Item -LiteralPath $modelPageFile).Length -gt 1024) {
         $pagePdfPaths.Add($modelPageFile)
       }
+    }
+  }
+
+  # КРАЙНИЙ FALLBACK — native accoreconsole (_.-EXPORT _PDF, только Model, 1 стр.).
+  # Выполняется ТОЛЬКО если: нет печатаемых листов И COM-печать модели не удалась.
+  # Документ COM уже закрываем, чтобы снять блокировку файла перед accoreconsole.
+  if ($pagePdfPaths.Count -eq 0) {
+    try { if ($document) { $document.Close($false) } } catch {}
+    $document = $null
+    $nativeExportScript = Join-Path $PSScriptRoot 'Invoke-NativeDwgPdfExport.ps1'
+    if (Test-Path -LiteralPath $nativeExportScript) {
+      try {
+        . $nativeExportScript
+        $nativePdf = Join-Path $tempDir "native_fallback.pdf"
+        $null = Invoke-NativeDwgPdfExport -InputPath $InputPath -OutputPdf $nativePdf -WorkDir $tempDir -TimeoutSec 600
+        if ((Test-Path -LiteralPath $nativePdf) -and (Get-Item -LiteralPath $nativePdf).Length -gt 1024) {
+          $pagePdfPaths.Add($nativePdf)
+        }
+      } catch {}
     }
   }
 
