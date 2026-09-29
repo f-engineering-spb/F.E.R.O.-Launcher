@@ -130,6 +130,14 @@
             </div>
             <iframe class="excel-sheet-frame" id="excelSheetFrame" title="Лист Excel" loading="lazy"></iframe>
           </section>
+          <section class="excel-viewer" id="wordViewer" hidden aria-label="Просмотр Word-документа">
+            <div class="excel-book-title" id="wordDocTitle" title=""></div>
+            <div class="excel-tabs-bar">
+              <button class="excel-tab" id="wordOpenNative" type="button" title="Открыть оригинал в MS Word">Открыть в Word</button>
+              <div class="excel-tabs" id="wordMeta" aria-label="Сведения о документе"></div>
+            </div>
+            <iframe class="excel-sheet-frame" id="wordDocFrame" title="Документ Word" loading="lazy"></iframe>
+          </section>
           <div class="viewer-controls" id="viewerControls" hidden>
             <button id="viewOpenNative" type="button" title="Открыть в программе по умолчанию">Открыть</button>
             <button id="viewZoomOut" type="button" title="Уменьшить">−</button>

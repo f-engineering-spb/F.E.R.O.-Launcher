@@ -137,8 +137,19 @@ $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) "FEng_dwg_$fileId"
 New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
 
 try {
-  #                   '             '
-  $document = $app.Documents.Open($InputPath, $true)
+  # Открытие в режиме 'только чтение'. Холодный старт CAD иногда отклоняет
+  # первый COM-вызов (RPC_E_CALL_REJECTED) — повторяем до 3 раз с паузой.
+  $document = $null
+  $openAttempts = 0
+  while (-not $document -and $openAttempts -lt 3) {
+    $openAttempts++
+    try {
+      $document = $app.Documents.Open($InputPath, $true)
+    } catch {
+      if ($openAttempts -ge 3) { throw }
+      Start-Sleep -Seconds 20
+    }
+  }
   # BENCH-WINNER (5.1s): freeze screen regen during batch plot, no per-sheet redraws.
   $document.SetVariable("LAYOUTREGENCTL", 2)
   $document.SetVariable("REGENMODE", 0)

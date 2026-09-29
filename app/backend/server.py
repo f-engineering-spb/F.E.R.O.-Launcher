@@ -46,6 +46,15 @@ if str(REPO_ROOT) not in sys.path:
 _backend_dir = str(Path(__file__).resolve().parent)
 if _backend_dir not in sys.path:
     sys.path.insert(0, _backend_dir)
+
+try:
+    from app.rendering import dispatcher as rendering_dispatcher
+    from app.rendering import engine_excel as _engine_excel
+    from app.rendering import engine_word as _engine_word
+except Exception:  # ядро rendering опционально: сервер стартует и без него
+    rendering_dispatcher = None
+    _engine_excel = None
+    _engine_word = None
 RUNTIME_DIR = REPO_ROOT / "runtime"
 MANIFESTS_DIR = RUNTIME_DIR / "manifests"
 FRONTEND_DIR = REPO_ROOT / "app" / "frontend"
@@ -92,6 +101,10 @@ def get_launcher_version_info() -> dict:
         pass
     return {"version": APP_VERSION, "branch": APP_BRANCH}
 DEFAULT_PDF_DPI = 300
+# Архитектурный стандарт (docs/CORE_ARCH_RULES.md): нарезка страниц чертежей
+# и превью — строго 150 DPI PNG. 300 DPI и WebP в дефолтном тракте запрещены
+# (нагрузка CPU/память без выигрыша читаемости на экране).
+DWG_PREVIEW_DPI = 150
 PDF_PAGE_TIMEOUT_SECONDS = 25
 PDF_DOCUMENT_TIMEOUT_SECONDS = 600
 WORD_CONVERT_TIMEOUT_SECONDS = 120
@@ -625,82 +638,28 @@ def pdf_page_count(path: Path) -> int:
 
 
 def word_to_pdf(path: Path) -> tuple[Path, bool]:
-    if not path.exists():
-        raise FileNotFoundError(f"Word-файл не найден: {path}")
-    if not path.is_file() or not is_word_file(path):
-        raise ValueError(f"Это не Word-файл: {path}")
-    if not WORD_CONVERT_SCRIPT.exists():
-        raise RuntimeError(f"Скрипт конвертации Word не найден: {WORD_CONVERT_SCRIPT}")
-
+    """Шим ядра rendering: COM->PDF (фолбэк для .doc). Код — в app/rendering/engine_word."""
+    if _engine_word is None:
+        raise RuntimeError("Ядро rendering недоступно (app.rendering.engine_word)")
     key = file_cache_key(path, "word-pdf")
-    target_dir = WORD_CACHE_DIR / key
-    target_dir.mkdir(parents=True, exist_ok=True)
-    pdf_path = target_dir / f"{path.stem}.pdf"
-    manifest_path = target_dir / "manifest.json"
+    return _engine_word.ensure_word_pdf(
+        path, WORD_CACHE_DIR / key, key, WORD_CONVERT_SCRIPT,
+        WORD_CONVERT_TIMEOUT_SECONDS)
 
-    cached = False
-    if pdf_path.exists() and pdf_path.stat().st_size > 0 and manifest_path.exists():
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            cached = (
-                manifest.get("sourcePath") == str(path)
-                and manifest.get("cacheKey") == key
-                and manifest.get("sourceMtimeNs") == path.stat().st_mtime_ns
-                and manifest.get("sourceSize") == path.stat().st_size
-            )
-        except (OSError, json.JSONDecodeError):
-            cached = False
 
-    if cached:
-        return pdf_path, True
+def word_preview_html(path: Path) -> dict:
+    """Быстрый DOCX->HTML через ядро rendering (~1 с вместо ~20 с COM)."""
+    if _engine_word is None:
+        raise RuntimeError("Ядро rendering недоступно (app.rendering.engine_word)")
+    if not path.is_file() or path.suffix.casefold() != ".docx":
+        raise ValueError(f"Быстрый HTML-просмотр поддерживает DOCX: {path.name}")
+    key = file_cache_key(path, "word-html")
+    meta = _engine_word.ensure_docx_preview(path, WORD_CACHE_DIR / "html" / key)
+    meta = dict(meta)
+    meta["url"] = f"/cache/word/html/{key}/preview.html"
+    return {"name": path.name, "path": str(path), "cacheKey": key, **meta}
 
-    if pdf_path.exists():
-        pdf_path.unlink()
 
-    process = subprocess.run(
-        [
-            "powershell",
-            "-STA",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(WORD_CONVERT_SCRIPT),
-            "-InputPath",
-            str(path),
-            "-OutputPath",
-            str(pdf_path),
-        ],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=WORD_CONVERT_TIMEOUT_SECONDS,
-        **hidden_process_kwargs(),
-    )
-    if process.returncode != 0:
-        message = process.stderr.strip() or process.stdout.strip() or "Word не смог конвертировать документ в PDF"
-        raise RuntimeError(message)
-    if not pdf_path.exists() or pdf_path.stat().st_size <= 0:
-        raise RuntimeError("Word не создал PDF для preview")
-
-    manifest_path.write_text(
-        json.dumps(
-            {
-                "sourcePath": str(path),
-                "sourceName": path.name,
-                "sourceMtimeNs": path.stat().st_mtime_ns,
-                "sourceSize": path.stat().st_size,
-                "cacheKey": key,
-                "pdfPath": str(pdf_path),
-                "convertedAt": datetime.now().isoformat(timespec="seconds"),
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    return pdf_path, False
 
 
 def render_word(path: Path, dpi: int = DEFAULT_PDF_DPI, first_page_only: bool = False) -> dict:
@@ -2514,6 +2473,9 @@ def excel_preview_source(path: Path) -> Path:
 
 
 def excel_cell_color(color: object) -> str | None:
+    """Алиас ядра rendering (совместимость старых вызовов)."""
+    if _engine_excel is not None:
+        return _engine_excel.cell_color(color)
     value = getattr(color, "rgb", None)
     value = str(value) if value is not None else ""
     if not value or len(value) < 6 or (len(value) == 8 and value[:2] == "00"):
@@ -2522,143 +2484,14 @@ def excel_cell_color(color: object) -> str | None:
 
 
 def excel_sheet_html(path: Path, sheet_index: int) -> tuple[str, dict]:
-    """Create a read-only HTML sheet with authored geometry.
-
-    The Launcher is a fast navigator, not a replacement for Excel.  The limit is
-    intentional: long operational registers are opened in the native program.
-    """
-    if openpyxl is None:
-        raise RuntimeError("Для HTML-просмотра Excel нужен пакет openpyxl")
-
+    """Шим ядра rendering: один разбор книги -> все вкладки (см. app/rendering/engine_excel)."""
     preview_source = excel_preview_source(path)
+    if _engine_excel is None:
+        raise RuntimeError("Ядро rendering недоступно (app.rendering.engine_excel)")
+    return _engine_excel.render_sheet(
+        preview_source, sheet_index, excel_html_cache_dir(path))
 
-    book = openpyxl.load_workbook(preview_source, read_only=False, data_only=True)
-    try:
-        sheet = book.worksheets[sheet_index]
-        values = sheet
-        # Some valid workbooks (notably registers exported by third-party
-        # systems) have no stored dimension in one of the loaded views.
-        # openpyxl then returns None, which must mean an empty 1x1 sheet here,
-        # not an unhandled server exception and a blank Launcher screen.
-        sheet_max_row = int(sheet.max_row or 1)
-        values_max_row = int(values.max_row or 1)
-        sheet_max_column = int(sheet.max_column or 1)
-        values_max_column = int(values.max_column or 1)
-        max_column = min(max(sheet_max_column, values_max_column), MAX_XLSX_COLS)
-        columns = [
-            column
-            for column in range(1, max_column + 1)
-            if not sheet.column_dimensions[openpyxl.utils.get_column_letter(column)].hidden
-        ]
-        column_pixels = {}
-        for column in columns:
-            width = sheet.column_dimensions[openpyxl.utils.get_column_letter(column)].width or 8.43
-            column_pixels[column] = max(4, min(720, round(width * 7 + 5)))
 
-        merged_start = {}
-        merged_skip = set()
-        for area in sheet.merged_cells.ranges:
-            shown_columns = [column for column in columns if area.min_col <= column <= area.max_col]
-            if not shown_columns:
-                continue
-            start = (area.min_row, shown_columns[0])
-            merged_start[start] = (len(shown_columns), area.max_row - area.min_row + 1)
-            for row in range(area.min_row, area.max_row + 1):
-                for column in shown_columns:
-                    if (row, column) != start:
-                        merged_skip.add((row, column))
-
-        first_value_row = 0
-        last_value_row = 0
-        for row in range(1, min(values_max_row, MAX_XLSX_ROWS) + 1):
-            if any(values.cell(row, column).value is not None for column in columns):
-                if not first_value_row:
-                    first_value_row = row
-                last_value_row = row
-        last_merge_row = max((area.max_row for area in sheet.merged_cells.ranges), default=0)
-        rendered_rows = min(max(last_value_row, last_merge_row), MAX_XLSX_ROWS)
-        was_limited = max(sheet_max_row, values_max_row) > MAX_XLSX_ROWS
-
-        first_rendered_row = first_value_row or 1
-        rows = []
-        for row in range(first_rendered_row, rendered_rows + 1):
-            if sheet.row_dimensions[row].hidden:
-                continue
-            cells = []
-            for column in columns:
-                if (row, column) in merged_skip:
-                    continue
-                cell = sheet.cell(row, column)
-                raw_value = values.cell(row, column).value
-                value = "" if raw_value is None else str(raw_value)
-                css = []
-                # A single neutral grid is supplied by the page stylesheet.
-                # Re-emitting four border declarations for every cell made a
-                # 2,000-row workbook produce 8–9 MB of HTML and a long white
-                # screen before Chrome could paint it.  This is a navigator,
-                # so fast first paint has priority over reproducing every
-                # individual spreadsheet border colour.
-                if cell.font.bold:
-                    css.append("font-weight:500")
-                if cell.font.italic:
-                    css.append("font-style:italic")
-                # Defaults are already declared once in the HTML stylesheet.
-                # Repeating Calibri 11px on every one of 52,000 cells turns a
-                # normal workbook into a multi-megabyte page that opens white.
-                if cell.font.sz and round(cell.font.sz) != 11:
-                    css.append(f"font-size:{max(6, min(32, cell.font.sz))}px")
-                if cell.font.name and cell.font.name.casefold() not in {"calibri", "arial", "segoe ui"}:
-                    css.append(f"font-family:{html.escape(cell.font.name, quote=True)}")
-                font_color = excel_cell_color(cell.font.color)
-                if font_color:
-                    css.append(f"color:{font_color}")
-                fill = excel_cell_color(cell.fill.fgColor)
-                if cell.fill.fill_type == "solid" and fill:
-                    css.append(f"background:{fill}")
-                if cell.alignment.horizontal in {"left", "center", "right"}:
-                    css.append(f"text-align:{cell.alignment.horizontal}")
-                if cell.alignment.vertical in {"top", "center", "bottom"}:
-                    css.append(f"vertical-align:{cell.alignment.vertical}")
-                if cell.alignment.wrap_text is False:
-                    css.append("white-space:pre;overflow:hidden")
-                colspan, rowspan = merged_start.get((row, column), (1, 1))
-                span = (f' colspan="{colspan}"' if colspan > 1 else "") + (f' rowspan="{rowspan}"' if rowspan > 1 else "")
-                cells.append(f'<td{span} style="{";".join(css)}">{html.escape(value)}</td>')
-            authored_height = sheet.row_dimensions[row].height
-            row_style = f' style="height:{max(1, round(authored_height * 1.33))}px"' if authored_height else ""
-            rows.append(f"<tr{row_style}><th>{row}</th>{''.join(cells)}</tr>")
-
-        cols = '<col class="row-number">' + "".join(
-            f'<col style="width:{column_pixels[column]}px">' for column in columns
-        )
-        table_width = 38 + sum(column_pixels.values())
-        notice = (
-            f"Показаны первые {MAX_XLSX_ROWS:,} строк. Полный рабочий файл откройте в Excel."
-            if was_limited else "Просмотр без редактирования"
-        )
-        rendered = {
-            "name": sheet.title,
-            "rows": max(0, rendered_rows - first_rendered_row + 1),
-            "firstRow": first_rendered_row,
-            "columns": len(columns),
-            "limited": was_limited,
-        }
-        page = f'''<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>{html.escape(sheet.title)}</title>
-<style>
-html,body{{margin:0;min-width:max-content;background:#fff;color:#20262d;font:11px "Segoe UI",Arial,sans-serif;overflow:auto}}
-#sheet-canvas{{position:relative;transform-origin:0 0}}#sheet{{position:absolute;left:0;top:0;transform-origin:50% 50%}}
-.notice{{position:sticky;top:0;z-index:2;padding:6px 10px;border-bottom:1px solid #d3dde4;background:#f7fafc;color:#607080;font-size:11px}}
-table{{border-collapse:collapse;table-layout:fixed;width:{table_width}px}}col.row-number{{width:38px}}
-th,td{{box-sizing:border-box;border:1px solid #cbd5dc;padding:2px 4px;vertical-align:top;white-space:pre-wrap;overflow-wrap:break-word}}
-th{{position:sticky;left:0;z-index:1;background:#f1f5f7;color:#657687;font:10px "Segoe UI",Arial,sans-serif;text-align:right}}td{{overflow:hidden}}
-</style></head><body><div id="sheet-canvas"><div id="sheet"><table><colgroup>{cols}</colgroup><tbody>{''.join(rows)}</tbody></table></div></div>
-<script>const canvas=document.getElementById('sheet-canvas'),sheet=document.getElementById('sheet');let width=0,height=0,padding=0,scale=1,rotation=0,hand=true,dragging=false,startX=0,startY=0,startLeft=0,startTop=0;function dimensions(){{return Math.abs(rotation%180)===90?{{width:height,height:width}}:{{width,height}}}}function zoom(value){{if(!width){{width=sheet.offsetWidth;height=sheet.offsetHeight}}scale=Math.max(.35,Math.min(3,value));padding=Math.max(innerWidth,innerHeight);const size=dimensions();canvas.style.width=(size.width*scale+padding*2)+'px';canvas.style.height=(size.height*scale+padding*2)+'px';sheet.style.transform='translate('+(padding+size.width*scale/2-width/2)+'px,'+(padding+size.height*scale/2-height/2)+'px) rotate('+rotation+'deg) scale('+scale+')'}}function fit(){{if(!width)zoom(1);const size=dimensions(),value=Math.min(1,(innerWidth-48)/size.width,(innerHeight-48)/size.height);zoom(value);requestAnimationFrame(()=>{{scrollTo(padding,padding);parent.postMessage({{type:'launcher-sheet-fitted',value:scale}},'*')}})}}function cursor(){{document.body.style.cursor=hand?(dragging?'grabbing':'grab'):'default'}}addEventListener('load',()=>{{zoom(1);cursor();requestAnimationFrame(()=>scrollTo(padding,padding))}});addEventListener('wheel',event=>{{if(!event.ctrlKey)return;event.preventDefault();zoom(scale*(event.deltaY<0?1.12:.89))}},{{passive:false}});addEventListener('pointerdown',event=>{{if(!hand||event.button!==0)return;dragging=true;startX=event.clientX;startY=event.clientY;startLeft=scrollX;startTop=scrollY;document.body.setPointerCapture?.(event.pointerId);cursor();event.preventDefault()}});addEventListener('pointermove',event=>{{if(!dragging)return;scrollTo(startLeft-(event.clientX-startX),startTop-(event.clientY-startY))}});addEventListener('pointerup',event=>{{if(!dragging)return;dragging=false;document.body.releasePointerCapture?.(event.pointerId);cursor()}});addEventListener('pointercancel',()=>{{dragging=false;cursor()}});addEventListener('keydown',event=>{{if(event.key==='Escape')parent.postMessage({{type:'launcher-escape'}},'*')}});addEventListener('dblclick',()=>{{parent.postMessage({{type:'launcher-toggle-full-view'}},'*')}});addEventListener('message',event=>{{if(!event.data)return;if(event.data.type==='launcher-sheet-zoom')zoom(event.data.value);if(event.data.type==='launcher-sheet-fit')fit();if(event.data.type==='launcher-sheet-rotate'){{rotation=((Number(event.data.value)||0)%360+360)%360;zoom(scale)}}if(event.data.type==='launcher-sheet-hand'){{hand=Boolean(event.data.value);dragging=false;cursor()}}}});</script></body></html>'''
-        return page, rendered
-    finally:
-        try:
-            book.close()
-        except Exception:
-            pass
 
 
 def excel_sheet_preview(path: Path, sheet_index: int) -> dict:
@@ -3754,7 +3587,9 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 body = self.read_json()
                 raw_file = str(body.get("file", "")).strip()
                 page = int(body.get("page") or 1)
-                dpi = int(body.get("dpi") or DEFAULT_PDF_DPI)
+                # Срез страницы DWG по стандарту: 150 DPI PNG (DWG_PREVIEW_DPI).
+                # Явный dpi клиента уважаем (HiDPI-зум), дефолт 300 запрещен.
+                dpi = int(body.get("dpi") or DWG_PREVIEW_DPI)
                 if dpi < 72 or dpi > 600:
                     raise ValueError("DPI должен быть в диапазоне 72-600")
                 if not raw_file:
@@ -3862,6 +3697,32 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 payload["convertedPdfPath"] = str(pdf_path)
                 payload["convertCacheHit"] = convert_cache_hit
                 self.send_json(HTTPStatus.OK, payload)
+            except Exception as error:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+            return
+
+        if parsed.path == "/api/preview":
+            try:
+                body = self.read_json()
+                raw_file = str(body.get("file", "")).strip()
+                if not raw_file:
+                    raise ValueError("Не выбран файл для отображения")
+                if rendering_dispatcher is None:
+                    raise RuntimeError("Ядро rendering недоступно (app.rendering)")
+                payload = rendering_dispatcher.get_file_preview(
+                    Path(raw_file), runtime_dir=RUNTIME_DIR)
+                self.send_json(HTTPStatus.OK, payload)
+            except Exception as error:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+            return
+
+        if parsed.path == "/api/word/preview":
+            try:
+                body = self.read_json()
+                raw_file = str(body.get("file", "")).strip()
+                if not raw_file:
+                    raise ValueError("Не выбран Word-файл для отображения")
+                self.send_json(HTTPStatus.OK, word_preview_html(Path(raw_file)))
             except Exception as error:
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
             return

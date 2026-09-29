@@ -32,6 +32,7 @@ const state = {
   excelWorkbookIndex: 0,
   excelSheetIndex: 0,
   excelScale: 1,
+  wordDoc: null,
   highQualityPages: new Map(),
   pdfPairIndex: new Map(),
   pairless: false,
@@ -94,6 +95,11 @@ const els = {
   excelTabsLeft: document.getElementById("excelTabsLeft"),
   excelTabsRight: document.getElementById("excelTabsRight"),
   excelSheetFrame: document.getElementById("excelSheetFrame"),
+  wordViewer: document.getElementById("wordViewer"),
+  wordDocTitle: document.getElementById("wordDocTitle"),
+  wordMeta: document.getElementById("wordMeta"),
+  wordDocFrame: document.getElementById("wordDocFrame"),
+  wordOpenNative: document.getElementById("wordOpenNative"),
   viewerEmpty: document.getElementById("viewerEmpty"),
   viewerControls: document.getElementById("viewerControls"),
   qualityBadge: document.getElementById("qualityBadge"),
@@ -1287,6 +1293,12 @@ async function previewFileDirectly(node, options = {}) {
     return;
   }
 
+  // 1a. DOCX: быстрый HTML через ядро rendering (без Word COM).
+  if (ext === "DOCX") {
+    await showWordPreviewFast(node, options);
+    return;
+  }
+
   // 2. Если файл уже отрендерен в памяти ЦЕЛИКОМ — мгновенно переключаемся.
   // Если в памяти только титульник (рендер из папки), проваливаемся ниже
   // к полному рендеру, иначе пользователь навсегда останется на 1-й странице.
@@ -1315,7 +1327,7 @@ async function previewFileDirectly(node, options = {}) {
   // 3. Подготовка элемента для рендеринга одиночного документа
   let item = node;
 
-  if (["DOC", "DOCX", "RTF"].includes(ext)) {
+  if (["DOC", "RTF"].includes(ext)) {
     item = {
       ...node,
       previewType: "WORD",
@@ -1355,18 +1367,8 @@ async function previewFileDirectly(node, options = {}) {
       previewFor: { type: "TXT", name: node.name, path: node.path },
     };
   } else {
-    const nativeCard = {
-      type: "native-file",
-      name: node.name,
-      sourcePath: node.path,
-      documentPath: node.path,
-      sourceType: ext,
-      message: "Файл открывается через ассоциации Windows или настроенную нативную программу.",
-    };
-    // Карточка тоже новое отображение: стираем ленту целиком.
-    resetPdfPreview();
-    showPdfPage(nativeCard);
-    if (options.fullView) setViewerMode("full");
+    // Нативный формат: карточка с метаданными ядра + кнопка открытия.
+    await showNativeAppCard(node, options);
     return;
   }
 
@@ -2227,6 +2229,124 @@ function clearExcelViewer() {
   els.excelBookTitle.title = "";
   els.excelTabs.replaceChildren();
   els.excelSheetFrame.removeAttribute("src");
+  clearWordViewer();
+}
+
+function clearWordViewer() {
+  state.wordDoc = null;
+  if (els.wordViewer) els.wordViewer.hidden = true;
+  if (els.wordDocTitle) { els.wordDocTitle.textContent = ""; els.wordDocTitle.title = ""; }
+  if (els.wordMeta) els.wordMeta.replaceChildren();
+  if (els.wordDocFrame) els.wordDocFrame.removeAttribute("src");
+}
+
+function formatFileSize(bytes) {
+  const n = Number(bytes);
+  if (!Number.isFinite(n) || n < 0) return "";
+  if (n >= 1048576) return `${(n / 1048576).toFixed(2)} МБ`;
+  if (n >= 1024) return `${(n / 1024).toFixed(1)} КБ`;
+  return `${n} Б`;
+}
+
+function nativeTypeLabel(ext) {
+  const e = String(ext || "").toUpperCase();
+  if (["MPP", "MPT"].includes(e)) return "Проект Microsoft Project";
+  if (["MOV", "MP4", "M4V", "AVI", "MKV", "WEBM", "MPEG", "MPG"].includes(e)) return "Видеофайл";
+  if (["ZIP", "RAR", "7Z", "TAR", "GZ"].includes(e)) return "Архив";
+  if (["RVT", "RFA", "NWC", "NWD", "IFC"].includes(e)) return "BIM-модель";
+  if (["PPT", "PPTX"].includes(e)) return "Презентация";
+  if (["VSD", "VSDX"].includes(e)) return "Схема Visio";
+  return `Файл .${e.toLowerCase()}`;
+}
+
+async function showWordPreviewFast(node, options = {}) {
+  // Быстрый HTML-рендер DOCX через ядро rendering (~1 с вместо ~20 с COM).
+  // При любой ошибке — фолбэк на старый COM-путь через PDF.
+  clearExcelViewer();
+  resetPdfPreview();
+  setActiveNativePath(node.path);
+  state.revealedPath = node.path;
+  if (options.fullView) setViewerMode("full");
+  else setViewerMode("standard");
+  els.pdfViewer.classList.remove("empty");
+  els.pdfPageImage.hidden = true;
+  els.pdfPageImage.removeAttribute("src");
+  els.viewerEmpty.hidden = true;
+  els.viewerControls.hidden = false;
+  els.viewRotate.hidden = true;
+  els.viewPanMode.hidden = true;
+  els.wordDocTitle.textContent = node.name;
+  els.wordDocTitle.title = node.name;
+  els.wordMeta.replaceChildren();
+  els.wordViewer.hidden = false;
+  els.wordOpenNative.onclick = () => openFileByPath(node.path, "native");
+  revealPathInTree(node.path);
+  try {
+    startProgress("Документ Word (быстрое превью)", node.path);
+    const response = await fetch("/api/word/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file: node.path }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "Не удалось построить HTML-превью");
+    state.wordDoc = { path: node.path, name: node.name, ...payload };
+    const chip = document.createElement("span");
+    chip.className = "excel-tab";
+    chip.textContent = `${payload.paragraphs ?? "?"} абз. · ${payload.tables ?? "?"} табл. · ${formatFileSize(payload.bytes)}`;
+    els.wordMeta.append(chip);
+    els.wordDocFrame.src = payload.url;
+    finishProgress("Документ готов");
+  } catch (error) {
+    console.warn("[Launcher] fast Word preview failed, fallback to COM:", error);
+    const item = {
+      ...node,
+      previewType: "WORD",
+      previewFor: { type: "DOCX", name: node.name, path: node.path },
+    };
+    await renderSelectedPdfFiles([item], { singleFile: true, fullView: options.fullView });
+  }
+  if (options.fullView) setViewerMode("full");
+}
+
+async function showNativeAppCard(node, options = {}) {
+  // Карточка нативного формата: метаданные из ядра (/api/preview),
+  // открытие — через /api/open-file. При недоступности ядра — generic-карточка.
+  resetPdfPreview();
+  let card = {
+    type: "native-file",
+    name: node.name,
+    sourcePath: node.path,
+    documentPath: node.path,
+    sourceType: (node.extension || "").toUpperCase(),
+    message: "Файл открывается через ассоциации Windows или настроенную нативную программу.",
+  };
+  try {
+    const response = await fetch("/api/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file: node.path }),
+    });
+    const info = await response.json();
+    const native = response.ok && info
+      ? (info.type === "native_app" ? info : info.fallback || null)
+      : null;
+    if (native) {
+      const label = nativeTypeLabel(native.extension);
+      card = {
+        type: "native-file",
+        name: native.name || node.name,
+        sourcePath: node.path,
+        documentPath: node.path,
+        sourceType: String(native.extension || node.extension || "").toUpperCase(),
+        message: `${label} · ${formatFileSize(native.bytes)}. ${native.hint || "Нажмите кнопку, чтобы открыть."}`,
+      };
+    }
+  } catch (error) {
+    console.warn("[Launcher] /api/preview unavailable, generic native card:", error);
+  }
+  showPdfPage(card);
+  if (options.fullView) setViewerMode("full");
 }
 
 function resetPdfPreview() {
@@ -2471,6 +2591,7 @@ async function activateExcelWorkbook(index) {
     els.excelTabs.append(tab);
   });
   els.excelViewer.hidden = false;
+  if (els.wordViewer) els.wordViewer.hidden = true;
   els.viewerControls.hidden = false;
   els.viewRotate.hidden = true;
   els.viewPanMode.hidden = false;
@@ -2493,6 +2614,7 @@ async function showExcelWorkbooks(workbooks, options = {}) {
   } else {
     setStageActive(false);
     if (els.excelViewer) els.excelViewer.hidden = true;
+    if (els.wordViewer) els.wordViewer.hidden = true;
   }
 }
 
@@ -2523,6 +2645,11 @@ function createPageThumbElement(page) {
     else if (ext === "GSHEET") icon = "📊";
     else if (ext === "GSLIDES") icon = "📽️";
     else if (["ZIP", "RAR", "7Z"].includes(ext)) icon = "📦";
+    else if (["MPP", "MPT"].includes(ext)) icon = "📊";
+    else if (["MOV", "MP4", "M4V", "AVI", "MKV", "WEBM", "MPEG", "MPG"].includes(ext)) icon = "🎬";
+    else if (["RVT", "RFA", "NWC", "NWD", "IFC"].includes(ext)) icon = "🏗️";
+    else if (["PPT", "PPTX"].includes(ext)) icon = "📽️";
+    else if (["VSD", "VSDX"].includes(ext)) icon = "📝";
     else if (ext === "DWG") icon = "📐";
     else if (["DOC", "DOCX"].includes(ext)) icon = "📘";
     else if (["XLS", "XLSX"].includes(ext)) icon = "📗";
@@ -2890,6 +3017,7 @@ function showPdfPage(page, options = {}) {
   const skipTreeScroll = Boolean(options?.skipTreeScroll);
   if (els.txtViewer) els.txtViewer.hidden = true;
   state.activeTxtPath = "";
+  if (els.wordViewer) els.wordViewer.hidden = true;
 
   if (page.previewType === "IMAGE") {
     clearExcelViewer();
@@ -2945,6 +3073,11 @@ function showPdfPage(page, options = {}) {
     else if (ext === "GSHEET") icon = "📊";
     else if (ext === "GSLIDES") icon = "📽️";
     else if (["ZIP", "RAR", "7Z"].includes(ext)) icon = "📦";
+    else if (["MPP", "MPT"].includes(ext)) icon = "📊";
+    else if (["MOV", "MP4", "M4V", "AVI", "MKV", "WEBM", "MPEG", "MPG"].includes(ext)) icon = "🎬";
+    else if (["RVT", "RFA", "NWC", "NWD", "IFC"].includes(ext)) icon = "🏗️";
+    else if (["PPT", "PPTX"].includes(ext)) icon = "📽️";
+    else if (["VSD", "VSDX"].includes(ext)) icon = "📝";
     else if (ext === "DWG") icon = "📐";
     else if (["DOC", "DOCX"].includes(ext)) icon = "📘";
     else if (["XLS", "XLSX"].includes(ext)) icon = "📗";
@@ -3845,6 +3978,7 @@ els.backToTree.addEventListener("click", () => {
     if (state.excelWorkbooks?.length > 1 && els.excelViewer) {
       setStageActive(false);
       els.excelViewer.hidden = true;
+      if (els.wordViewer) els.wordViewer.hidden = true;
       els.pdfViewer?.classList.remove("empty");
       renderExcelWorkbookRail();
     }
@@ -3854,6 +3988,7 @@ els.backToTree.addEventListener("click", () => {
     setStageActive(false);
     if (state.excelWorkbooks?.length > 1 && els.excelViewer) {
       els.excelViewer.hidden = true;
+      if (els.wordViewer) els.wordViewer.hidden = true;
       els.pdfViewer?.classList.remove("empty");
       renderExcelWorkbookRail();
     }
@@ -4180,6 +4315,7 @@ function handleGlobalEscape() {
     if (state.excelWorkbooks?.length > 1 && els.excelViewer) {
       setStageActive(false);
       els.excelViewer.hidden = true;
+      if (els.wordViewer) els.wordViewer.hidden = true;
       els.pdfViewer?.classList.remove("empty");
       renderExcelWorkbookRail();
     }
@@ -4189,6 +4325,7 @@ function handleGlobalEscape() {
   if (els.pdfViewer?.classList.contains("stage-active") && (state.renderedPages?.length > 1 || state.excelWorkbooks?.length > 1)) {
     setStageActive(false);
     if (els.excelViewer) els.excelViewer.hidden = true;
+    if (els.wordViewer) els.wordViewer.hidden = true;
     els.pdfViewer?.classList.remove("empty");
     renderExcelWorkbookRail();
     return;
