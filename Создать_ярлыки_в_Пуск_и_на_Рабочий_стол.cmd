@@ -18,7 +18,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
     "$makeShortcut = { param($folder, $name); " ^
     "   if (-not $folder -or -not (Test-Path $folder)) { return }; " ^
     "   $s = $wsh.CreateShortcut((Join-Path $folder $name)); " ^
-    "   if ($pyw) { $s.TargetPath = $pyw; $s.Arguments = '\"' + $app + '\"'; } elseif (Test-Path $vbs) { $s.TargetPath = 'wscript.exe'; $s.Arguments = '\"' + $vbs + '\"'; } else { $s.TargetPath = $runCmd; }; " ^
+    "   if (Test-Path $vbs) { $s.TargetPath = 'wscript.exe'; $s.Arguments = '\"' + $vbs + '\"'; } elseif ($pyw) { $s.TargetPath = $pyw; $s.Arguments = '\"' + $app + '\"'; } else { $s.TargetPath = $runCmd; }; " ^
     "   $s.WorkingDirectory = '%~dp0'; " ^
     "   $s.Description = 'F-Engineering Launcher v3'; " ^
     "   if (Test-Path $ico) { $s.IconLocation = $ico + ',0'; }; " ^
