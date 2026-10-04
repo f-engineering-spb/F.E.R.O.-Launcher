@@ -112,7 +112,6 @@ const els = {
   viewPanMode: document.getElementById("viewPanMode"),
   contextMenu: document.getElementById("contextMenu"),
   viewStandardMode: document.getElementById("viewStandardMode"),
-  viewMediumMode: document.getElementById("viewMediumMode"),
   viewFullMode: document.getElementById("viewFullMode"),
   scaleWidget: document.getElementById("scaleWidget"),
   scaleResetBtn: document.getElementById("scaleResetBtn"),
@@ -1936,15 +1935,7 @@ function renderFormats() {
 }
 
 function updateViewerBanner(title) {
-  const el = document.getElementById("viewerBannerTitle");
-  const banner = document.getElementById("viewerHeaderBanner");
-  if (!banner) return;
-  banner.style.display = "flex";
-  if (!title) {
-    if (el) el.textContent = state.currentManifest?.name || 'Политика "Локальный компьютер"';
-    return;
-  }
-  if (el) el.textContent = title;
+  // Заголовок вьювера упразднен в пользу минималистичного интерфейса
 }
 
 function renderTree() {
@@ -3951,9 +3942,6 @@ async function loadMorePdfFiles(itemsToRender) {
 
 
 els.load.addEventListener("click", () => importObject(false).catch(showOperationError));
-if (document.getElementById("reloadPage")) {
-  document.getElementById("reloadPage").addEventListener("click", () => window.location.reload());
-}
 els.refresh.addEventListener("click", () => {
   if (inTreeMode()) refreshObjectInPlace().catch(showOperationError);
   else importObject(true).catch(showOperationError);
@@ -4069,7 +4057,6 @@ els.viewPanMode.addEventListener("click", () => {
   updateViewTransform();
 });
 if (els.viewStandardMode) els.viewStandardMode.addEventListener("click", () => setViewerMode("standard"));
-if (els.viewMediumMode) els.viewMediumMode.addEventListener("click", () => setViewerMode("medium"));
 if (els.viewFullMode) els.viewFullMode.addEventListener("click", () => setViewerMode("full"));
 
 // Блокируем масштабирование всего окна браузера (Ctrl + / Ctrl - / Ctrl + wheel в пустых местах),
@@ -4667,24 +4654,6 @@ function checkUpdates() {
 setTimeout(checkUpdates, 3000);
 loadObjectSummaries().catch((error) => {
   els.objectList.innerHTML = `<div class="empty-note">Ошибка загрузки списка: ${error.message}</div>`;
-});
-
-// Меню действий в шапке
-document.getElementById("menuFile")?.addEventListener("click", () => els.load.click());
-document.getElementById("menuAction")?.addEventListener("click", () => {
-  if (!els.display.disabled) els.display.click();
-  else if (!els.refresh.disabled) els.refresh.click();
-  else els.load.click();
-});
-document.getElementById("menuView")?.addEventListener("click", () => {
-  if (els.scaleResetBtn) els.scaleResetBtn.click();
-});
-document.getElementById("menuHelp")?.addEventListener("click", () => {
-  showToast("F-Engineering Launcher v3 — Справка");
-  if (inTreeMode()) {
-    stopDiffPolling();
-    setMode("objects");
-  }
 });
 
 // Кэш настроек из /api/config/apps: действие по умолчанию,
