@@ -1,30 +1,30 @@
-# Agent instructions for F-Engineering Launcher
+# Agent instructions for F.E.R.O.-Launcher
 
-## Source of truth
+## Absolute Single Source of Truth (SSOT)
 
-This repository is the source of truth for Launcher v3 application code.
+- **CANONICAL LOCATION**: `C:\Users\a9379\Documents\Codex\F.E.R.O.-Launcher`
+- **DEFAULT BRANCH**: `main`
+- **BASELINE COMMIT**: `5edf1427d53ef5fd920cd47a89c6292476a5a8a7` (tag `v1.0.0-fero-base`)
 
-Do not treat old local Launcher folders, Google Drive virtual disks, exported demos, or browser-served experiments as authoritative unless explicitly named as donor material.
+CRITICAL RULE FOR ALL AI AGENTS (OpenCode, Claude, Cursor, Antigravity, ChatGPT, Codex):
+1. **DO NOT** search the filesystem, disks, or other directories for alternative launcher versions, legacy platforms, or past checkpoints.
+2. **DO NOT** reference or touch `FEngineering_Platform`, `FEngineering_Launcher`, `%TEMP%`, or `scratch` directories.
+3. This directory (`C:\Users\a9379\Documents\Codex\F.E.R.O.-Launcher`) is the ONLY authoritative repository and working tree.
+4. Always adhere to `docs/CORE_ARCH_RULES.md` and `docs/RENDERING_SPEC.md` (150 DPI PNG raster via PyMuPDF, instant Word HTML, cached Excel sheets, native format cards).
 
 ## Runtime safety
 
-- Keep live runtime execution on a local Windows `C:` workspace.
-- Do not use Google Drive `G:` or `H:` as the live writable runtime root.
-- Do not commit generated caches, manifests, rendered previews, logs, object files, customer documents, secrets, or temporary outputs.
+- Keep live runtime execution in this workspace (`C:\Users\a9379\Documents\Codex\F.E.R.O.-Launcher`).
+- Launch GUI through `app\flauncher.pyw` or the desktop shortcut `F.E.R.O.-Launcher`.
+- Do not commit generated caches, manifests, rendered previews, or logs (`runtime/cache/`, `runtime/logs/`).
 
 ## Development discipline
 
-- Make small, verifiable changes.
+- Make small, verifiable changes on branch `main`.
 - Keep frontend, backend, render pipeline, and runtime data separated.
-- After each meaningful change, run a local smoke test and record the result in the handoff/summary.
-- Preserve accepted viewer behavior unless the user explicitly changes it.
 - Treat Cyrillic text as a first-class project requirement. All source, docs, JSON manifests, HTML, CSS, JS, and Python files must be UTF-8.
-- Do not judge Cyrillic correctness from raw PowerShell output alone: Windows console encoding can display valid UTF-8 as mojibake. Verify text with UTF-8-aware checks, browser rendering, or Python `unicode_escape` inspection when needed.
 - Static text assets served by the backend must include `charset=utf-8` for text content types.
-- If mojibake appears in committed source text, stop and fix encoding before adding product logic.
-- See `docs/ENCODING.md` before editing Russian UI labels, backend messages, manifests, or generated text.
-- Always start Launcher v3 through `scripts/start_windows.cmd`; do not start the backend with ad-hoc PowerShell snippets when Russian paths, labels, or Google Drive paths are involved.
-- Always run `scripts/check_encoding.cmd` before and after changes that touch Russian text, Windows paths, backend messages, frontend labels, or docs.
+- Always check `docs/CORE_ARCH_RULES.md` before modifying rendering or preview logic.
 
 ## Product direction
 

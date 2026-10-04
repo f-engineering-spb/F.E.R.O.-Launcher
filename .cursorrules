@@ -1,0 +1,9 @@
+# F.E.R.O.-Launcher Project Rules
+
+- Absolute workspace root: `C:\Users\a9379\Documents\Codex\F.E.R.O.-Launcher`
+- Single Source of Truth: This project directory is the ONLY launcher repository.
+- DO NOT search for or use `FEngineering_Platform`, `FEngineering_Launcher`, or scratch directories.
+- Default Git branch: `main`
+- Core rendering standards: `docs/CORE_ARCH_RULES.md`
+- Encoding: UTF-8 strictly across all files.
+- Launch: pythonw.exe app\flauncher.pyw
