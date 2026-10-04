@@ -3152,32 +3152,6 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 self.send_error(HTTPStatus.BAD_REQUEST, str(error))
             return
 
-        if parsed.path == "/api/dwg/thumbnail":
-            try:
-                params = parse_qs(parsed.query)
-                raw_path = params.get("path", [""])[0].strip()
-                if not raw_path:
-                    self.send_error(HTTPStatus.BAD_REQUEST, "Missing path")
-                    return
-                target = Path(raw_path).expanduser().resolve()
-                if not target.exists() or not target.is_file():
-                    self.send_error(HTTPStatus.NOT_FOUND, "File not found")
-                    return
-                try:
-                    from app.backend.dwg_engine import extract_raw_thumbnail_from_dwg, _generate_placeholder_png
-                except ImportError:
-                    from dwg_engine import extract_raw_thumbnail_from_dwg, _generate_placeholder_png
-                thumb = extract_raw_thumbnail_from_dwg(target)
-                body = thumb[0] if thumb else _generate_placeholder_png(target.name, "Model")
-                self.send_response(HTTPStatus.OK)
-                self.send_header("Content-Type", "image/png")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-            except Exception as error:
-                self.send_error(HTTPStatus.BAD_REQUEST, str(error))
-            return
-
         if parsed.path == "/api/objects":
             self.send_json(HTTPStatus.OK, {"items": list_object_summaries()})
             return
