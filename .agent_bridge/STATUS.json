@@ -1,8 +1,0 @@
-{
-  "status": "IDLE",
-  "current_task_id": null,
-  "last_updated": null,
-  "worker": "WINDOWS_LOCAL_AGENT",
-  "autocad_available": true,
-  "logs": []
-}
