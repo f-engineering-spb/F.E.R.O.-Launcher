@@ -68,5 +68,108 @@ class ExcelBaselineScenario(unittest.TestCase):
                   f"first={first_ms:.0f}ms repeat={re_ms:.1f}ms")
 
 
+class ExcelBaselineLosses(unittest.TestCase):
+    """E03: синтетические проверки текущих потерь (без исправлений).
+
+    Каждый тест описывает наблюдаемое поведение движка на искусственной
+    книге без данных клиента:
+    - формула без сохранённого значения показывает пустую клетку;
+    - процентный/денежный форматы не применяются (видно сырое число);
+    - превышение лимита строк помечается limited, но предупреждение
+      в HTML отсутствует;
+    - превышение лимита столбцов обрезается молча (limited=False);
+    - намеренно скрытый столбец исключается без предупреждения
+      (само скрытие ошибкой не считается).
+    """
+
+    def _render_one(self, tmp: Path, name: str, build) -> tuple[dict, str]:
+        src = tmp / name
+        build(src)
+        cache = tmp / (name + ".cache")
+        metas = engine_excel.ensure_workbook_rendered(src, cache)
+        self.assertEqual(len(metas), 1)
+        page = (cache / "sheet-1-v10.html").read_text(encoding="utf-8")
+        return metas[0], page
+
+    def test_formula_without_cached_value_is_empty(self):
+        def build(src: Path) -> None:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "S"
+            ws["A1"] = 7
+            ws["A2"] = "=A1*2"
+            wb.save(str(src))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, page = self._render_one(Path(tmp), "formula.xlsx", build)
+            self.assertNotIn(">14<", page)
+            self.assertIn("<td", page)
+
+    def test_percent_and_money_formats_not_applied(self):
+        def build(src: Path) -> None:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "S"
+            ws["B1"] = 0.5
+            ws["B1"].number_format = "0%"
+            ws["C1"] = 1234.5
+            ws["C1"].number_format = "#,##0.00"
+            wb.save(str(src))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, page = self._render_one(Path(tmp), "formats.xlsx", build)
+            self.assertIn(">0.5<", page)
+            self.assertNotIn(">50%<", page)
+            self.assertIn(">1234.5<", page)
+            self.assertNotIn(">1,234.50<", page)
+
+    def test_row_limit_flag_without_visible_warning(self):
+        def build(src: Path) -> None:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Big"
+            for r in range(1, engine_excel.MAX_ROWS + 11):
+                ws.cell(row=r, column=1, value=r)
+            wb.save(str(src))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            meta, page = self._render_one(Path(tmp), "rows.xlsx", build)
+            self.assertTrue(meta["limited"])
+            self.assertNotIn('class="notice"', page)
+
+    def test_column_limit_is_silent(self):
+        def build(src: Path) -> None:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Wide"
+            for c in range(1, engine_excel.MAX_COLS + 11):
+                ws.cell(row=1, column=c, value=c)
+            wb.save(str(src))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            meta, page = self._render_one(Path(tmp), "wide.xlsx", build)
+            self.assertEqual(meta["columns"], engine_excel.MAX_COLS)
+            self.assertFalse(meta["limited"])
+            self.assertNotIn(">101<", page)
+            self.assertNotIn('class="notice"', page)
+
+    def test_hidden_column_excluded_without_warning(self):
+        def build(src: Path) -> None:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "H"
+            ws["A1"] = "a"
+            ws["B1"] = "b-hidden"
+            ws["C1"] = "c"
+            ws.column_dimensions["B"].hidden = True
+            wb.save(str(src))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            meta, page = self._render_one(Path(tmp), "hidden.xlsx", build)
+            self.assertEqual(meta["columns"], 2)
+            self.assertNotIn("b-hidden", page)
+            self.assertNotIn('class="notice"', page)
+
+
 if __name__ == "__main__":
     unittest.main()
