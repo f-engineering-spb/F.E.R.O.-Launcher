@@ -1264,6 +1264,10 @@ function syncSelectionToPreview(fileNode) {
 
 async function previewFileDirectly(node, options = {}) {
   if (!node || node.type !== "file") return;
+  // R01: одиночный показ владеет эпохой, как ленточный: поздний ответ
+  // предыдущего документа не должен переписывать новый (успех, ошибка,
+  // фолбэк — все сверяются с эпохой ниже).
+  state.renderEpoch = (state.renderEpoch || 0) + 1;
   setActiveNativePath(node.path);
   state.revealedPath = node.path;
   const ext = (node.extension || "").toUpperCase();
@@ -2267,6 +2271,9 @@ function activateWordHtmlCard(page, options = {}) {
 async function showWordPreviewFast(node, options = {}) {
   // Быстрый HTML-рендер DOCX через ядро rendering (~1 с вместо ~20 с COM).
   // При любой ошибке — фолбэк на старый COM-путь через PDF.
+  // R01: эпоха-владелец фиксируется на входе (явная из карточки ленты либо
+  // текущая для одиночного клика — previewFileDirectly её поднимает выше).
+  const entryEpoch = options.epoch ?? state.renderEpoch;
   clearExcelViewer();
   resetPdfPreview();
   setActiveNativePath(node.path);
@@ -2296,7 +2303,7 @@ async function showWordPreviewFast(node, options = {}) {
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "Не удалось построить HTML-превью");
     // S01: поздний ответ (пользователь уже переключил документ) — не трогаем DOM.
-    if (options.epoch != null && state.renderEpoch !== options.epoch) return;
+    if (state.renderEpoch !== entryEpoch) return;
     state.wordDoc = { path: node.path, name: node.name, ...payload };
     const chip = document.createElement("span");
     chip.className = "excel-tab";
@@ -2306,7 +2313,8 @@ async function showWordPreviewFast(node, options = {}) {
     finishProgress("Документ готов");
   } catch (error) {
     console.warn("[Launcher] fast Word preview failed, fallback to COM:", error);
-    if (options.epoch != null && state.renderEpoch !== options.epoch) return;
+    // R01: поздняя ошибка тоже не уводит показ на фолбэк чужого документа.
+    if (state.renderEpoch !== entryEpoch) return;
     const item = {
       ...node,
       previewType: "WORD",
@@ -3833,7 +3841,8 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
         controller = null;
       }
     }
-  }
+    } // S01: конец while попыток одного прохода.
+  } // S01: конец for проходов (первая страница → полный).
   if (!state.progressCancelled && state.renderEpoch === myEpoch) {
     completedBatches += 1;
     completedFiles += batch.length;
@@ -4021,14 +4030,13 @@ async function loadMorePdfFiles(itemsToRender) {
         if (state.renderEpoch === myEpoch) await appendPagesToViewer(errCards, null, myEpoch);
         loadErrors += itemsToFetch.length;
         batchDone = true;
-    } finally {
+      } finally {
       if (controller) {
         state.operationControllers = state.operationControllers.filter((item) => item !== controller);
         controller = null;
       }
     }
-    } // S01: конец while попыток одного прохода.
-  } // S01: конец for проходов (первая страница → полный).
+  }
   if (!state.progressCancelled && state.renderEpoch === myEpoch) {
     completedBatches += 1;
     completedFiles += batch.length;
