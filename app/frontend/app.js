@@ -2250,6 +2250,20 @@ function nativeTypeLabel(ext) {
   return `Файл .${e.toLowerCase()}`;
 }
 
+// S01: DOCX-карточка ленты → тот же быстрый HTML, что и одиночный клик.
+// Поздняя карточка (эпоха ушла) молча игнорируется.
+function activateWordHtmlCard(page, options = {}) {
+  if (!page) return;
+  if (page.epoch != null && state.renderEpoch !== page.epoch) return;
+  const filePath = page.previewFor?.path || page.sourcePath || "";
+  const fileName = page.previewFor?.name || page.sourceName || page.name || "";
+  if (!filePath) return;
+  showWordPreviewFast({ path: filePath, name: fileName }, {
+    epoch: page.epoch ?? state.renderEpoch,
+    fullView: Boolean(options?.fullView),
+  });
+}
+
 async function showWordPreviewFast(node, options = {}) {
   // Быстрый HTML-рендер DOCX через ядро rendering (~1 с вместо ~20 с COM).
   // При любой ошибке — фолбэк на старый COM-путь через PDF.
@@ -2281,6 +2295,8 @@ async function showWordPreviewFast(node, options = {}) {
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "Не удалось построить HTML-превью");
+    // S01: поздний ответ (пользователь уже переключил документ) — не трогаем DOM.
+    if (options.epoch != null && state.renderEpoch !== options.epoch) return;
     state.wordDoc = { path: node.path, name: node.name, ...payload };
     const chip = document.createElement("span");
     chip.className = "excel-tab";
@@ -2290,9 +2306,11 @@ async function showWordPreviewFast(node, options = {}) {
     finishProgress("Документ готов");
   } catch (error) {
     console.warn("[Launcher] fast Word preview failed, fallback to COM:", error);
+    if (options.epoch != null && state.renderEpoch !== options.epoch) return;
     const item = {
       ...node,
       previewType: "WORD",
+      skipWordHtmlFast: true,
       previewFor: { type: "DOCX", name: node.name, path: node.path },
     };
     await renderSelectedPdfFiles([item], { singleFile: true, fullView: options.fullView });
@@ -2627,6 +2645,17 @@ function createPageThumbElement(page) {
     prev.textContent = "TXT…";
     thumb.append(prev);
     fillTxtThumbPreview(page, prev);
+  } else if (page.previewType === "WORDHTML") {
+    // S01: миниатюра DOCX — тот же кэшированный HTML, что и большой просмотр
+    // (паттерн Excel-карточек; классы переиспользованы, своего CSS нет).
+    const prev = document.createElement("div");
+    prev.className = "excel-book-preview";
+    const frame = document.createElement("iframe");
+    frame.src = page.url || "about:blank";
+    frame.title = `Миниатюра ${page.sourceName || page.name}`;
+    frame.tabIndex = -1;
+    prev.append(frame);
+    thumb.append(prev);
   } else if (page.type === "missing-preview" || page.type === "native-file") {
     const missing = document.createElement("div");
     missing.className = "missing-preview-card";
@@ -2671,14 +2700,16 @@ function createPageThumbElement(page) {
     const docPath = thumbPathForPage(page);
     if (docPath) selectRailPath(docPath, event);
     if (event.shiftKey || event.ctrlKey || event.metaKey) return;
-    showPdfPage(page);
+    if (page.previewType === "WORDHTML") activateWordHtmlCard(page);
+    else showPdfPage(page);
     thumb.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
   });
 
   thumb.addEventListener("dblclick", (event) => {
     event.stopPropagation();
     state.activeNavZone = "thumbs";
-    showPdfPage(page);
+    if (page.previewType === "WORDHTML") activateWordHtmlCard(page, { fullView: true });
+    else showPdfPage(page);
     setViewerMode("full");
   });
   wrap.append(thumb);
@@ -2846,6 +2877,7 @@ function pageKey(page) {
   // как «дубликаты»).
   if (page.previewType === "IMAGE") return `image|${page.previewFor?.path || page.path || page.url || page.name}`;
   if (page.previewType === "TXT") return `txt|${page.previewFor?.path || page.path || page.name}`;
+  if (page.previewType === "WORDHTML") return `wordhtml|${page.previewFor?.path || page.sourcePath || page.url || page.name}`;
   return `${page.documentPath || ""}|${page.page || ""}`;
 }
 
@@ -3009,6 +3041,12 @@ function showPdfPage(page, options = {}) {
   if (els.txtViewer) els.txtViewer.hidden = true;
   state.activeTxtPath = "";
   if (els.wordViewer) els.wordViewer.hidden = true;
+
+  // S01: DOCX-карточка ленты — большой просмотр тем же быстрым HTML.
+  if (page.previewType === "WORDHTML") {
+    activateWordHtmlCard(page, options);
+    return;
+  }
 
   if (page.previewType === "IMAGE") {
     clearExcelViewer();
@@ -3453,6 +3491,59 @@ async function renderSelectedFiles() {
   await renderSelectedPdfFiles(previewItems);
 }
 
+// S01: расширение Word-элемента ленты (тип лежит в previewFor.type).
+function wordItemExt(item) {
+  return String(item?.extension || item?.previewFor?.type || "").toUpperCase();
+}
+
+// S01: DOCX в ленте — быстрая HTML-карточка вместо полного COM-рендера.
+// Возврат: "card" + карточка (показать и выйти), "com" (идти COM-путём),
+// "gone" (эпоха ушла — новый показ владеет UI, просто выйти).
+async function fetchWordHtmlCard(item, myEpoch) {
+  const filePath = item?.previewFor?.path || item?.path || "";
+  const fileName = item?.previewFor?.name || item?.name || "";
+  if (!filePath) return { status: "com" };
+  let controller = null;
+  try {
+    controller = new AbortController();
+    state.operationControllers.push(controller);
+    const response = await fetch("/api/word/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file: filePath }),
+      signal: controller.signal,
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "HTML preview failed");
+    if (state.progressCancelled || state.renderEpoch !== myEpoch) return { status: "gone" };
+    return {
+      status: "card",
+      card: {
+        previewType: "WORDHTML",
+        name: fileName,
+        url: payload.url,
+        bytes: payload.bytes,
+        sourcePath: filePath,
+        sourceName: fileName,
+        sourceType: "DOCX",
+        epoch: myEpoch,
+        previewFor: { type: "DOCX", name: fileName, path: filePath },
+      },
+    };
+  } catch (error) {
+    // Отмена/ушедшая эпоха — глотаем; остальное — COM-фолбэк у вызывающего.
+    if (state.progressCancelled || state.renderEpoch !== myEpoch || error?.name === "AbortError") {
+      return { status: "gone" };
+    }
+    return { status: "com" };
+  } finally {
+    if (controller) {
+      state.operationControllers = state.operationControllers.filter((c) => c !== controller);
+      controller = null;
+    }
+  }
+}
+
 async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDisplay(), options = {}) {
   if (!previewItems.length) {
     startProgress("Превью не найдено", "Выберите папку или файлы (PDF, DWG, Word, Excel).");
@@ -3577,6 +3668,23 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
     const isDwg = itemsToFetch[0]?.previewType === "DWG_MODEL";
     const isWord = itemsToFetch[0]?.previewType === "WORD";
     const isExcel = itemsToFetch[0]?.previewType === "EXCEL";
+    // S01: DOCX в ленте — быстрые HTML-карточки вместо полного COM-рендера
+    // ("card" — показать и выйти; "gone" — эпоха ушла, выйти; "com" — ниже).
+    if (isWord && itemsToFetch.length === 1 && !itemsToFetch[0]?.skipWordHtmlFast
+        && wordItemExt(itemsToFetch[0]) === "DOCX") {
+      const fetched = await fetchWordHtmlCard(itemsToFetch[0], myEpoch);
+      if (fetched.status === "gone") return;
+      if (fetched.status === "card") {
+        pageGroups[batchIndex] = [fetched.card];
+        await appendPagesToViewer([fetched.card], null, myEpoch);
+        return;
+      }
+      // "com": падаем ниже на существующий COM-путь для этого файла.
+    }
+    // S01: COM-путь Word — сначала только первая страница (быстрая видимая
+    // миниатюра), затем полный проход в фоне той же эпохи. Остальные типы —
+    // один полный проход, как раньше. Счётчики страниц — только по полному.
+    const wordFirstOnlyPasses = isWord ? [true, false] : [false];
     // Облачный диск отвечает медленно: таймаут пачки масштабируем числом
     // файлов (до PDF_FETCH_TIMEOUT_MS), а оборванную по таймауту пачку
     // повторяем один раз — сервер тем временем продолжает рендер и греет
@@ -3584,9 +3692,11 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
     const batchTimeout = isDwg ? 600000 : isWord ? 180000 : isExcel ? 180000
       : Math.max(180000, Math.min(PDF_FETCH_TIMEOUT_MS, 60000 * Math.max(1, itemsToFetch.length)));
     let controller = null;
-    let attempt = 0;
     let batchDone = false;
-    while (!batchDone && attempt < 2) {
+    for (const firstOnlyPass of wordFirstOnlyPasses) {
+      if (state.progressCancelled || state.renderEpoch !== myEpoch) return;
+      let attempt = 0;
+      while (!batchDone && attempt < 2) {
       attempt += 1;
       if (attempt > 1 && !isSingle) {
         els.progressDetail.textContent = (isDwg && totalDwgFiles > 0)
@@ -3612,7 +3722,9 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
       const requestBody = {
         files: itemsToFetch.map((file) => file.path),
         dpi: PDF_PREVIEW_DPI,
-        firstPageOnly: false,
+        // S01: COM-путь Word идёт двумя проходами: сначала только первая
+        // страница, затем всё остальное. Остальные типы — один полный проход.
+        firstPageOnly: firstOnlyPass,
       };
 
       const _batchT0 = performance.now();
@@ -3644,13 +3756,19 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
           sourceType: item?.extension || "PDF",
           message: payload.error || "Ошибка превью. Откройте файл через кнопку «Открыть».",
         }));
+        // Первый проход упал: карточки не показываем — полный проход ниже
+        // сам разберётся и честно покажет ошибку, если она повторится.
+        if (firstOnlyPass) break;
         pageGroups[batchIndex] = errCards;
         await appendPagesToViewer(errCards, null, myEpoch);
         batchDone = true;
       } else {
         if (state.progressCancelled || state.renderEpoch !== myEpoch) return;
-        totalPages += payload.totalPages || 0;
-        renderedPages += payload.renderedPages || 0;
+        // S01: счётчики страниц — только по полному проходу, иначе финиш задвоится.
+        if (!firstOnlyPass) {
+          totalPages += payload.totalPages || 0;
+          renderedPages += payload.renderedPages || 0;
+        }
         allErrors.push(...(payload.errors || []));
 
         const batchPages = payload.documents.flatMap((document) => {
@@ -3676,6 +3794,9 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
         });
         pageGroups[batchIndex] = batchPages;
         await appendPagesToViewer(batchPages, null, myEpoch);
+        // S01: первый проход — первая страница уже видна; остальное добавит
+        // полный проход (дедуп по pageKey отсечёт повторы).
+        if (firstOnlyPass) break;
         batchDone = true;
       }
     } catch (error) {
@@ -3701,6 +3822,8 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
             : "Ошибка рендеринга. Откройте файл через кнопку «Открыть».",
         };
       });
+      // S01: первый проход упал исключением — молча идём на полный проход.
+      if (firstOnlyPass) break;
       pageGroups[batchIndex] = errCards;
       await appendPagesToViewer(errCards, null, myEpoch);
       batchDone = true;
@@ -3898,13 +4021,14 @@ async function loadMorePdfFiles(itemsToRender) {
         if (state.renderEpoch === myEpoch) await appendPagesToViewer(errCards, null, myEpoch);
         loadErrors += itemsToFetch.length;
         batchDone = true;
-      } finally {
+    } finally {
       if (controller) {
         state.operationControllers = state.operationControllers.filter((item) => item !== controller);
         controller = null;
       }
     }
-  }
+    } // S01: конец while попыток одного прохода.
+  } // S01: конец for проходов (первая страница → полный).
   if (!state.progressCancelled && state.renderEpoch === myEpoch) {
     completedBatches += 1;
     completedFiles += batch.length;
