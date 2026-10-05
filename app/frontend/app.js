@@ -3717,7 +3717,10 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
     try {
       controller = new AbortController();
       state.operationControllers.push(controller);
-      const timeoutId = setTimeout(() => controller.abort(), batchTimeout);
+      // Живой баг: при сетевой ошибке fetch управление уходит в catch мимо
+      // clearTimeout, таймер доживает до срабатывания, когда controller уже
+      // null (finally), и роняет непойманный TypeError. Глушим здесь.
+      const timeoutId = setTimeout(() => { try { controller.abort(); } catch (_) {} }, batchTimeout);
 
       const endpoint = isWord
         ? "/api/word/render"
