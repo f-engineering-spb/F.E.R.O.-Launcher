@@ -30,7 +30,7 @@ WORD_COM_TIMEOUT_SECONDS = 120
 
 # Версия HTML-рендера DOCX. Поднимается при любом изменении выдачи docx_to_html_string.
 # ensure_docx_preview сверяет её в метаданных и не отдаёт старый HTML за новый.
-DOCX_HTML_RENDER_VERSION = 2
+DOCX_HTML_RENDER_VERSION = 3
 
 # Сколько секунд чужой lock-файл считается живым (защита от зависших генераций).
 CACHE_LOCK_STALE_SECONDS = 180
@@ -91,6 +91,7 @@ class _Numbering:
     def __init__(self, doc, diagnostics: list):
         self._diag = diagnostics
         self._abstracts: dict = {}
+        self._abstract_has_restart: dict = {}
         self._nums: dict = {}
         self._counters: dict = {}
         self._last: tuple | None = None
@@ -101,42 +102,63 @@ class _Numbering:
         for abstract in numbering.findall(W + "abstractNum"):
             aid = abstract.get(W + "abstractNumId")
             levels = {}
+            has_restart = False
             for lvl in abstract.findall(W + "lvl"):
                 ilvl_raw = lvl.get(W + "ilvl")
                 try:
                     ilvl = int(ilvl_raw)
                 except (TypeError, ValueError):
                     continue
-                get = lambda tag: (lvl.find(W + tag).get(W + "val")
-                                   if lvl.find(W + tag) is not None else None)
-                try:
-                    start = int(get("start") or 1)
-                except ValueError:
-                    start = 1
-                levels[ilvl] = {
-                    "start": start,
-                    "numFmt": get("numFmt") or "decimal",
-                    "lvlText": get("lvlText") or "",
-                    "lvlRestart": get("lvlRestart"),
-                }
+                parsed = self._parse_level(lvl)
+                if parsed.get("lvlRestart") is not None:
+                    has_restart = True
+                levels[ilvl] = parsed
             self._abstracts[aid] = levels
+            self._abstract_has_restart[aid] = has_restart
         for num in numbering.findall(W + "num"):
             nid = num.get(W + "numId")
             aid_el = num.find(W + "abstractNumId")
-            overrides = {}
+            starts = {}
+            level_ov = {}
             for override in num.findall(W + "lvlOverride"):
+                try:
+                    oilvl = int(override.get(W + "ilvl"))
+                except (TypeError, ValueError):
+                    continue
                 start_el = override.find(W + "startOverride")
                 if start_el is not None:
                     try:
-                        overrides[int(override.get(W + "ilvl"))] = int(start_el.get(W + "val"))
+                        starts[oilvl] = int(start_el.get(W + "val"))
                     except (TypeError, ValueError):
                         pass
+                nested = override.find(W + "lvl")
+                if nested is not None:
+                    level_ov[oilvl] = self._parse_level(nested)
             self._nums[nid] = {
                 "abstract": aid_el.get(W + "val") if aid_el is not None else None,
-                "overrides": overrides,
+                "starts": starts,
+                "levels": level_ov,
             }
 
-    def _level_def(self, abstract_id, ilvl):
+    @staticmethod
+    def _parse_level(lvl_el) -> dict:
+        get = lambda tag: (lvl_el.find(W + tag).get(W + "val")
+                           if lvl_el.find(W + tag) is not None else None)
+        try:
+            start = int(get("start") or 1)
+        except ValueError:
+            start = 1
+        return {
+            "start": start,
+            "numFmt": get("numFmt") or "decimal",
+            "lvlText": get("lvlText") or "",
+            "lvlRestart": get("lvlRestart"),
+        }
+
+    def _level_def(self, num_id, abstract_id, ilvl):
+        override = ((self._nums.get(str(num_id)) or {}).get("levels", {}) or {}).get(ilvl)
+        if override is not None:
+            return override
         levels = self._abstracts.get(abstract_id)
         if levels is None:
             return None
@@ -168,27 +190,39 @@ class _Numbering:
             return None
         abstract_id = num["abstract"]
         level = int(ilvl) if ilvl is not None else 0
-        state = self._counters.setdefault(
-            str(num_id), {"levels": [None] * 9, "seen_override": set()})
+        state = self._counters.setdefault(str(num_id), {"levels": [None] * 9})
         counters = state["levels"]
-        # Явные перезапуски уровней (lvlRestart=N: уровень сбрасывается при росте уровня N).
-        for other, other_def in (self._abstracts.get(abstract_id) or {}).items():
-            restart = (other_def or {}).get("lvlRestart")
+        # Перезапуски: уровень X сбрасывается, когда наступает уровень R из его
+        # lvlRestart; без атрибута — когда наступает любой более высокий уровень.
+        # lvlRestart=0 означает перезапуск при наступлении уровня 0 (а не «никогда»).
+        for other in range(9):
+            if other == level:
+                definition_o = self._level_def(num_id, abstract_id, other)
+                restart_o = (definition_o or {}).get("lvlRestart")
+                try:
+                    restart_n = int(restart_o) if restart_o is not None else None
+                except ValueError:
+                    restart_n = None
+                if restart_n == level:
+                    counters[other] = None
+                continue
+            definition_o = self._level_def(num_id, abstract_id, other)
+            restart_o = (definition_o or {}).get("lvlRestart")
             try:
-                restart_n = int(restart) if restart is not None else None
+                restart_n = int(restart_o) if restart_o is not None else None
             except ValueError:
                 restart_n = None
-            if restart_n == level and other != level:
+            if restart_n is not None:
+                if restart_n == level:
+                    counters[other] = None
+            elif other > level:
                 counters[other] = None
-        # Уровни глубже текущего сбрасываются (стандартное поведение Word).
-        for deeper in range(level + 1, 9):
-            counters[deeper] = None
 
         def level_start(idx: int) -> int:
-            override = num["overrides"].get(idx)
+            override = num["starts"].get(idx)
             if override is not None:
                 return override
-            definition = self._level_def(abstract_id, idx)
+            definition = self._level_def(num_id, abstract_id, idx)
             return (definition or {}).get("start", 1) or 1
 
         if counters[level] is None:
@@ -197,7 +231,7 @@ class _Numbering:
             counters[level] += 1
         self._last = (str(num_id), level)
 
-        definition = self._level_def(abstract_id, level)
+        definition = self._level_def(num_id, abstract_id, level)
         if definition is None:
             self._diag.append(f"numId:{num_id} ilvl:{level} без lvl — номер пропущен")
             return None
@@ -209,7 +243,7 @@ class _Numbering:
                                        definition.get("lvlText") or "\u2022")
 
         def formatted(idx: int) -> str:
-            idx_def = self._level_def(abstract_id, idx) or {}
+            idx_def = self._level_def(num_id, abstract_id, idx) or {}
             value = counters[idx]
             if value is None:
                 value = idx_def.get("start", 1) or 1
@@ -220,35 +254,49 @@ class _Numbering:
         return re.sub(r"%([1-9])", lambda m: formatted(int(m.group(1)) - 1), template)
 
 
-def _paragraph_num_pr(paragraph, style_cache: dict | None = None) -> tuple | None:
-    """(numId, ilvl) абзаца: прямой numPr либо нумерация через цепочку стилей.
+def _split_num_pr(num_pr_el) -> tuple:
+    """(numId|None, ilvl|None) — None сохраняется, чтобы вызыватель мог дополнить."""
+    if num_pr_el is None:
+        return None, None
+    num_id_el = num_pr_el.find(W + "numId")
+    ilvl_el = num_pr_el.find(W + "ilvl")
+    num_id = num_id_el.get(W + "val") if num_id_el is not None else None
+    ilvl_raw = ilvl_el.get(W + "val") if ilvl_el is not None else None
+    try:
+        ilvl = int(ilvl_raw) if ilvl_raw is not None else None
+    except ValueError:
+        ilvl = None
+    return num_id, ilvl
 
-    Обход цепочки стилей кэшируется по styleId (стили повторяются, а резолв
-    style-объекта дорог) — выдача та же, что при обходе на каждый абзац.
+
+def _paragraph_num_pr(paragraph, style_cache: dict | None = None) -> tuple | None:
+    """(numId, ilvl) абзаца.
+
+    Прямой numPr дополняется нумерацией из цепочки стилей поатрибутно:
+    недостающий numId/ilvl берётся из стиля. Обход цепочки кэшируется по styleId.
     """
-    pPr = paragraph._p.find(W + "pPr")
+    direct_id, direct_ilvl = None, None
     style_id = None
+    pPr = paragraph._p.find(W + "pPr")
     if pPr is not None:
-        num_pr = pPr.find(W + "numPr")
-        if num_pr is not None:
-            num_id_el = num_pr.find(W + "numId")
-            ilvl_el = num_pr.find(W + "ilvl")
-            num_id = num_id_el.get(W + "val") if num_id_el is not None else None
-            ilvl_raw = ilvl_el.get(W + "val") if ilvl_el is not None else None
-            try:
-                ilvl = int(ilvl_raw) if ilvl_raw is not None else 0
-            except ValueError:
-                ilvl = 0
-            return num_id, ilvl
+        direct_id, direct_ilvl = _split_num_pr(pPr.find(W + "numPr"))
         p_style = pPr.find(W + "pStyle")
         if p_style is not None:
             style_id = p_style.get(W + "val")
+    if direct_id is not None and direct_ilvl is not None:
+        return direct_id, direct_ilvl
     if style_cache is not None and style_id in style_cache:
-        return style_cache[style_id]
-    num_ref = _style_chain_num_pr(paragraph)
-    if style_cache is not None:
-        style_cache[style_id] = num_ref
-    return num_ref
+        style_ref = style_cache[style_id]
+    else:
+        style_ref = _style_chain_num_pr(paragraph)
+        if style_cache is not None:
+            style_cache[style_id] = style_ref
+    style_id_v, style_ilvl = style_ref or (None, None)
+    num_id = direct_id if direct_id is not None else style_id_v
+    if num_id is None:
+        return None
+    ilvl = direct_ilvl if direct_ilvl is not None else style_ilvl
+    return num_id, ilvl if ilvl is not None else 0
 
 
 def _style_chain_num_pr(paragraph) -> tuple | None:
@@ -261,16 +309,8 @@ def _style_chain_num_pr(paragraph) -> tuple | None:
         except Exception:
             break
         if style_pPr is not None:
-            num_pr = style_pPr.find(W + "numPr")
-            if num_pr is not None:
-                num_id_el = num_pr.find(W + "numId")
-                ilvl_el = num_pr.find(W + "ilvl")
-                num_id = num_id_el.get(W + "val") if num_id_el is not None else None
-                ilvl_raw = ilvl_el.get(W + "val") if ilvl_el is not None else None
-                try:
-                    ilvl = int(ilvl_raw) if ilvl_raw is not None else 0
-                except ValueError:
-                    ilvl = 0
+            num_id, ilvl = _split_num_pr(style_pPr.find(W + "numPr"))
+            if num_id is not None or ilvl is not None:
                 return num_id, ilvl
         try:
             style = style.base_style
@@ -319,30 +359,60 @@ def _has_content(p_element) -> bool:
 
 
 def _run_html(run_el, stats: dict) -> str:
-    """HTML одного w:r (форматирование без ссылок/картинок — они на уровне выше)."""
-    texts = []
-    for node in run_el.iter():
-        if node.tag == W + "t" and node.text:
-            texts.append(node.text)
+    """HTML одного w:r. Текст экранируется сразу, разметка <br> — нет."""
+    parts = []
+    for node in run_el:
+        if node.tag == W + "t":
+            if node.text:
+                parts.append(_html.escape(node.text))
         elif node.tag == W + "tab":
-            texts.append("  ")
+            parts.append("  ")
         elif node.tag == W + "br":
-            texts.append("<br>")
-    text = _html.escape("".join(texts))
+            parts.append("<br>")
+    text = "".join(parts)
     if not text:
         return ""
     rPr = run_el.find(W + "rPr")
     bold = italic = underline = False
     if rPr is not None:
-        bold = rPr.find(W + "b") is not None
-        italic = rPr.find(W + "i") is not None
-        underline = rPr.find(W + "u") is not None
+        bold = _is_on(rPr.find(W + "b"))
+        italic = _is_on(rPr.find(W + "i"))
+        underline = _underline_on(rPr.find(W + "u"))
     if bold:
         text = f"<b>{text}</b>"
     if italic:
         text = f"<i>{text}</i>"
     if underline:
         text = f"<u>{text}</u>"
+    return text
+
+
+def _is_on(el) -> bool:
+    """ST_OnOff: отсутствие = вкл; явные false/0/off/no/none = выкл."""
+    if el is None:
+        return False
+    val = (el.get(W + "val") or "true").strip().lower()
+    return val not in ("false", "0", "off", "no", "none", "f", "n")
+
+
+def _underline_on(el) -> bool:
+    if el is None:
+        return False
+    val = (el.get(W + "val") or "single").strip().lower()
+    return val != "none"
+
+
+def _styled_text(text: str, rPr) -> str:
+    """Единая реализация b/i/u для обычного текста и гиперссылок."""
+    if not text:
+        return ""
+    if rPr is not None:
+        if _is_on(rPr.find(W + "b")):
+            text = f"<b>{text}</b>"
+        if _is_on(rPr.find(W + "i")):
+            text = f"<i>{text}</i>"
+        if _underline_on(rPr.find(W + "u")):
+            text = f"<u>{text}</u>"
     return text
 
 
@@ -360,10 +430,14 @@ class _BlockRenderer:
     """Построчный рендер содержимого: runs, гиперссылки, закладки, рисунки, поля."""
 
     def __init__(self, doc, stats: dict):
-        self._rels = doc.part.rels
+        self._doc_rels = doc.part.rels
         self._stats = stats
 
-    def images_in(self, element) -> str:
+    def _rels_for(self, rels):
+        return rels if rels is not None else self._doc_rels
+
+    def images_in(self, element, rels=None) -> str:
+        rels = self._rels_for(rels)
         out = []
         for node in element.iter():
             if node.tag == A + "blip":
@@ -372,10 +446,10 @@ class _BlockRenderer:
                 rid = node.get(R_ID)
             else:
                 continue
-            if rid in self._rels:
+            if rid in rels:
                 try:
-                    blob = self._rels[rid].target_part.blob
-                    ctype = self._rels[rid].target_part.content_type
+                    blob = rels[rid].target_part.blob
+                    ctype = rels[rid].target_part.content_type
                 except Exception:
                     continue
                 if ctype in ("image/emf", "image/wmf"):
@@ -389,10 +463,11 @@ class _BlockRenderer:
             self._stats["images"] = self._stats.get("images", 0) + len(out)
         return "".join(out)
 
-    def content_html(self, p_element, *, allow_fields_marker: bool) -> str:
+    def content_html(self, p_element, *, allow_fields_marker: bool, rels=None) -> str:
         """Внутренний HTML абзаца: гиперссылки, закладки, рисунки, поля страниц.
 
         Runs разбираются за один проход по дочерним узлам (без повторных поисков).
+        rels — relationships части-владельца (у колонтитулов свои rels).
         """
         out = []
         in_field = False
@@ -406,27 +481,25 @@ class _BlockRenderer:
                     self._stats["anchors"] = self._stats.get("anchors", 0) + 1
                 continue
             if child.tag == W + "hyperlink":
-                out.append(self._hyperlink_html(child))
+                out.append(self._hyperlink_html(child, rels))
                 continue
             if child.tag != W + "r":
                 continue
-            texts: list = []
-            bold = italic = underline = False
+            parts: list = []
+            run_rPr = None
             run_instr: str | None = None
             run_fld: str | None = None
             for node in child:
                 ntag = node.tag
                 if ntag == W + "t":
                     if node.text:
-                        texts.append(node.text)
+                        parts.append(_html.escape(node.text))
                 elif ntag == W + "tab":
-                    texts.append("  ")
+                    parts.append("  ")
                 elif ntag == W + "br":
-                    texts.append("<br>")
+                    parts.append("<br>")
                 elif ntag == W + "rPr":
-                    bold = node.find(W + "b") is not None
-                    italic = node.find(W + "i") is not None
-                    underline = node.find(W + "u") is not None
+                    run_rPr = node
                 elif ntag == W + "instrText":
                     code = (node.text or "").strip().split()
                     if code:
@@ -455,19 +528,14 @@ class _BlockRenderer:
                     if field_name not in marked:
                         marked.append(field_name)
                 continue
-            text = _html.escape("".join(texts))
+            text = _styled_text("".join(parts), run_rPr)
             if not text:
                 continue
-            if bold:
-                text = f"<b>{text}</b>"
-            if italic:
-                text = f"<i>{text}</i>"
-            if underline:
-                text = f"<u>{text}</u>"
             out.append(text)
         return "".join(out)
 
-    def _hyperlink_html(self, link_el) -> str:
+    def _hyperlink_html(self, link_el, rels=None) -> str:
+        rels = self._rels_for(rels)
         inner_runs = "".join(_run_html(r, self._stats) for r in link_el.findall(W + "r"))
         inner = inner_runs or _html.escape("".join(
             t.text or "" for t in link_el.findall(".//" + W + "t")))
@@ -478,9 +546,9 @@ class _BlockRenderer:
         anchor = link_el.get(W + "anchor")
         if anchor:
             return f'<a href="#bm-{_html.escape(anchor)}">{inner}</a>'
-        if rid and rid in self._rels:
+        if rid and rid in rels:
             try:
-                target = self._rels[rid].target_ref or ""
+                target = rels[rid].target_ref or ""
             except Exception:
                 target = ""
             href = _sanitize_href(target)
@@ -602,7 +670,7 @@ def _vmerge_rowspan(table, row_idx: int, start_col: int, span: int) -> int:
 
 
 def _render_table(table, renderer: _BlockRenderer, numbering: _Numbering,
-                  num_cache: dict, tag_cache: dict) -> str:
+                  num_cache: dict, tag_cache: dict, rels=None) -> str:
     parts = ["<table>"]
     for row_idx, row in enumerate(table.rows):
         parts.append("<tr>")
@@ -621,7 +689,8 @@ def _render_table(table, renderer: _BlockRenderer, numbering: _Numbering,
             chunks = []
             for paragraph in cell.paragraphs:
                 chunks.append(_render_paragraph_inner(
-                    paragraph, renderer, numbering, num_cache, tag_cache, in_table=True))
+                    paragraph, renderer, numbering, num_cache, tag_cache,
+                    in_table=True, rels=rels))
             parts.append(f"<td{attrs}>{'<br>'.join(c for c in chunks if c)}</td>")
         parts.append("</tr>")
     parts.append("</table>")
@@ -638,15 +707,16 @@ def _alignment_class(paragraph) -> str:
 
 def _render_paragraph_inner(paragraph, renderer: _BlockRenderer,
                             numbering: _Numbering, num_cache: dict, tag_cache: dict,
-                            *, in_table: bool) -> str:
+                            *, in_table: bool, rels=None) -> str:
     num_ref = _paragraph_num_pr(paragraph, num_cache)
     marker = ""
     if num_ref is not None:
         number = numbering.number_for(*num_ref)
         if number:
             marker = f'<span class="wnum">{_html.escape(number)}</span> '
-    return marker + renderer.content_html(paragraph._p, allow_fields_marker=True) \
-        + renderer.images_in(paragraph._p)
+    return marker + renderer.content_html(paragraph._p, allow_fields_marker=True,
+                                          rels=rels) \
+        + renderer.images_in(paragraph._p, rels)
 
 
 def _render_paragraph_block(paragraph, renderer: _BlockRenderer, numbering: _Numbering,
@@ -655,7 +725,7 @@ def _render_paragraph_block(paragraph, renderer: _BlockRenderer, numbering: _Num
         return None
     tag = _heading_tag(paragraph, tag_cache)
     inner = _render_paragraph_inner(paragraph, renderer, numbering, num_cache, tag_cache,
-                                    in_table=False)
+                                    in_table=False, rels=None)
     return f"<{tag}{_alignment_class(paragraph)}>{inner}</{tag}>"
 
 
@@ -694,15 +764,20 @@ def _walk_body(doc):
 def _render_header_footer(container, renderer: _BlockRenderer, numbering: _Numbering,
                           num_cache: dict, tag_cache: dict,
                           kind: str, section_idx: int) -> str | None:
+    try:
+        part_rels = container.part.rels
+    except Exception:
+        part_rels = None
     chunks = []
     for paragraph in container.paragraphs:
         if not _has_content(paragraph._p):
             continue
         inner = _render_paragraph_inner(paragraph, renderer, numbering, num_cache, tag_cache,
-                                        in_table=False)
+                                        in_table=False, rels=part_rels)
         chunks.append(f"<p>{inner}</p>")
     for table in container.tables:
-        chunks.append(_render_table(table, renderer, numbering, num_cache, tag_cache))
+        chunks.append(_render_table(table, renderer, numbering, num_cache, tag_cache,
+                                    rels=part_rels))
     if not chunks:
         return None
     label = "Верхний колонтитул" if kind == "header" else "Нижний колонтитул"
@@ -758,6 +833,18 @@ def docx_to_html_string(src: Path) -> tuple[str, dict]:
         sections = []
     for idx, section in enumerate(sections):
         try:
+            sect_pr = section._sectPr
+        except Exception:
+            sect_pr = None
+        if sect_pr is not None:
+            for ref in list(sect_pr.findall(W + "headerReference")) + \
+                    list(sect_pr.findall(W + "footerReference")):
+                ref_type = ref.get(W + "type")
+                if ref_type in ("first", "even"):
+                    limited = stats.setdefault("headersUnsupported", [])
+                    if ref_type not in limited:
+                        limited.append(ref_type)
+        try:
             header = section.header
             linked_h = bool(header.is_linked_to_previous) and idx > 0
         except Exception:
@@ -797,46 +884,25 @@ def docx_to_html_string(src: Path) -> tuple[str, dict]:
                 seen.append(item)
         stats["numberingUnsupported"] = seen
     for key in ("blockedUrls", "linksUnsupported", "imagesUnsupported",
-                "fieldsMarked", "links", "images", "anchors"):
+                "fieldsMarked", "headersUnsupported",
+                "links", "images", "anchors"):
         if key in stats and not stats[key]:
             del stats[key]
     return "".join(parts), stats
 
 
-def _acquire_doc_lock(cache_dir: Path, timeout: int = CACHE_LOCK_STALE_SECONDS) -> bool:
-    """Per-документ lock-файл (только свой документ, без общей блокировки).
-
-    Возвращает True, если генерация разрешена нам. False — другой процесс уже
-    сгенерировал результат, пока мы ждали.
-    """
+def _try_acquire_lock(cache_dir: Path) -> bool:
+    """Одноразовая попытка взять per-документ lock. True — генерация за нами."""
     cache_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = cache_dir / "preview.lock"
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            try:
-                os.write(fd, str(os.getpid()).encode())
-            finally:
-                os.close(fd)
-            return True
-        except FileExistsError:
-            pass
-        try:
-            age = time.time() - lock_path.stat().st_mtime
-        except OSError:
-            age = 0
-        if age > CACHE_LOCK_STALE_SECONDS:
-            try:
-                lock_path.unlink()
-            except OSError:
-                pass
-            continue
-        if _cache_complete(cache_dir):
-            return False
-        if time.monotonic() >= deadline:
-            raise TimeoutError("Другой процесс слишком долго готовит preview")
-        time.sleep(0.2)
+    try:
+        fd = os.open(str(cache_dir / "preview.lock"), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    try:
+        os.write(fd, str(os.getpid()).encode())
+    finally:
+        os.close(fd)
+    return True
 
 
 def _release_doc_lock(cache_dir: Path) -> None:
@@ -846,8 +912,26 @@ def _release_doc_lock(cache_dir: Path) -> None:
         pass
 
 
-def _cache_complete(cache_dir: Path) -> bool:
-    return (cache_dir / "preview.html").exists() and (cache_dir / "preview.json").exists()
+def _lock_age(cache_dir: Path) -> float | None:
+    try:
+        return time.time() - (cache_dir / "preview.lock").stat().st_mtime
+    except OSError:
+        return None
+
+
+def _read_valid_meta(meta_path: Path, html_path: Path, stat) -> dict | None:
+    """Валидная мета: JSON цел, HTML существует и непуст, источник и версия совпали."""
+    try:
+        if not html_path.exists() or html_path.stat().st_size == 0:
+            return None
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if (meta.get("sourceMtimeNs") == stat.st_mtime_ns
+            and meta.get("sourceSize") == stat.st_size
+            and meta.get("renderVersion") == DOCX_HTML_RENDER_VERSION):
+        return meta
+    return None
 
 
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
@@ -865,43 +949,35 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
         raise
 
 
-def _read_valid_meta(meta_path: Path, stat) -> dict | None:
-    try:
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if (meta.get("sourceMtimeNs") == stat.st_mtime_ns
-            and meta.get("sourceSize") == stat.st_size
-            and meta.get("renderVersion") == DOCX_HTML_RENDER_VERSION):
-        return meta
-    return None
-
-
 def ensure_docx_preview(src: Path, cache_dir: Path) -> dict:
     """Закэшированный DOCX→HTML. Повтор — дисковый хит без парсинга.
 
     Старый HTML (без renderVersion) за новый не выдаётся. Запись атомарна через
     временные файлы; одновременная генерация одного документа сериализуется
-    per-документ lock-файлом.
+    per-документ lock-файлом. Ожидающий видит только валидный кэш нужной версии
+    (устаревшая пара HTML/JSON готовностью не считается); при превышении ожидания
+    — обоснованный TimeoutError, а не RuntimeError из-за чужой генерации.
     """
     cache_dir = Path(cache_dir)
     out = cache_dir / "preview.html"
     meta_path = cache_dir / "preview.json"
     stat = src.stat()
-    meta = _read_valid_meta(meta_path, stat) if _cache_complete(cache_dir) else None
-    if meta is not None and out.exists():
+    meta = _read_valid_meta(meta_path, out, stat)
+    if meta is not None:
         meta["cacheHit"] = True
         return meta
-    if not _acquire_doc_lock(cache_dir):
-        meta = _read_valid_meta(meta_path, src.stat())
+    if _try_acquire_lock(cache_dir):
+        owned = True
+    else:
+        meta = _wait_valid_or_reacquire(cache_dir, out, meta_path, stat)
         if meta is not None:
             meta["cacheHit"] = True
             return meta
-        raise RuntimeError("Preview подготовлен другим процессом, но метаданные невалидны")
+        owned = True  # блокировка уже за нами (см. _wait_valid_or_reacquire)
     try:
         # Повторная проверка после взятия блокировки (гонка двух генераторов).
-        meta = _read_valid_meta(meta_path, stat) if _cache_complete(cache_dir) else None
-        if meta is not None and out.exists():
+        meta = _read_valid_meta(meta_path, out, stat)
+        if meta is not None:
             meta["cacheHit"] = True
             return meta
         page, stats = docx_to_html_string(src)
@@ -918,7 +994,36 @@ def ensure_docx_preview(src: Path, cache_dir: Path) -> dict:
         _atomic_write_bytes(meta_path, json.dumps(meta, ensure_ascii=False).encode("utf-8"))
         return meta
     finally:
-        _release_doc_lock(cache_dir)
+        if owned:
+            _release_doc_lock(cache_dir)
+
+
+def _wait_valid_or_reacquire(cache_dir: Path, out: Path, meta_path: Path, stat,
+                             timeout: int = CACHE_LOCK_STALE_SECONDS) -> dict | None:
+    """Ждать чужую генерацию.
+
+    Возвращает валидный кэш (брать как хит) либо None — тогда блокировка уже
+    захвачена нами и генерация за вызывающим. Устаревшая пара HTML/JSON
+    готовностью не считается. При превышении ожидания — TimeoutError.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        meta = _read_valid_meta(meta_path, out, stat)
+        if meta is not None:
+            return meta
+        age = _lock_age(cache_dir)
+        if age is None or age > CACHE_LOCK_STALE_SECONDS:
+            if age is not None:
+                try:
+                    (cache_dir / "preview.lock").unlink()
+                except OSError:
+                    pass
+            if _try_acquire_lock(cache_dir):
+                return None
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                "Preview не готов за отведённое ожидание чужой генерации")
+        time.sleep(0.2)
 
 
 def ensure_word_pdf(src: Path, target_dir: Path, cache_key: str,

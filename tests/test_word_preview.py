@@ -54,24 +54,62 @@ def _set_num_pr(paragraph, num_id: int, ilvl: int = 0) -> None:
     pPr.append(numPr)
 
 
-def _add_numbering(doc, abstract_id: int, levels, num_id: int, overrides=None) -> None:
-    """levels: [(start, numFmt, lvlText), ...]."""
+def _add_numbering(doc, abstract_id: int, levels, num_id: int, overrides=None,
+                   restarts=None, override_levels=None) -> None:
+    """levels: [(start, numFmt, lvlText), ...].
+
+    restarts: {ilvl: lvlRestart-val}. overrides: {ilvl: startOverride}.
+    override_levels: {ilvl: (numFmt, lvlText)} — вложенный w:lvl в lvlOverride.
+    """
     numbering = doc.part.numbering_part.numbering_definitions._numbering
-    lvl_xml = "".join(
-        f'<w:lvl w:ilvl="{i}"><w:start w:val="{s}"/>'
-        f'<w:numFmt w:val="{f}"/><w:lvlText w:val="{t}"/></w:lvl>'
-        for i, (s, f, t) in enumerate(levels))
+    lvl_xml = ""
+    for i, (s, f, t) in enumerate(levels):
+        restart = ""
+        if restarts and i in restarts:
+            restart = f'<w:lvlRestart w:val="{restarts[i]}"/>'
+        lvl_xml += (f'<w:lvl w:ilvl="{i}"><w:start w:val="{s}"/>'
+                    f'<w:numFmt w:val="{f}"/><w:lvlText w:val="{t}"/>{restart}</w:lvl>')
     abstract = parse_xml(
         f'<w:abstractNum {nsdecls("w")} w:abstractNumId="{abstract_id}">'
         f'<w:multiLevelType w:val="multilevel"/>{lvl_xml}</w:abstractNum>')
     numbering.append(abstract)
-    ov = "".join(
-        f'<w:lvlOverride w:ilvl="{k}"><w:startOverride w:val="{v}"/></w:lvlOverride>'
-        for k, v in (overrides or {}).items())
+    ov = ""
+    for k, v in (overrides or {}).items():
+        nested = ""
+        if override_levels and k in override_levels:
+            fmt, text = override_levels[k]
+            nested = (f'<w:lvl w:ilvl="{k}"><w:start w:val="1"/>'
+                      f'<w:numFmt w:val="{fmt}"/><w:lvlText w:val="{text}"/></w:lvl>')
+        ov += (f'<w:lvlOverride w:ilvl="{k}"><w:startOverride w:val="{v}"/>' +
+               nested + "</w:lvlOverride>")
     num = parse_xml(
         f'<w:num {nsdecls("w")} w:numId="{num_id}">'
         f'<w:abstractNumId w:val="{abstract_id}"/>{ov}</w:num>')
     numbering.append(num)
+
+
+def _set_num_id_only(paragraph, num_id: int) -> None:
+    """Частичный прямой numPr: только numId, без ilvl (ilvl доберётся из стиля)."""
+    pPr = paragraph._p.get_or_add_pPr()
+    old = pPr.find(qn("w:numPr"))
+    if old is not None:
+        pPr.remove(old)
+    numPr = OxmlElement("w:numPr")
+    nid = OxmlElement("w:numId")
+    nid.set(qn("w:val"), str(num_id))
+    numPr.append(nid)
+    pPr.append(numPr)
+
+
+def _add_break(run) -> None:
+    run._r.append(OxmlElement("w:br"))
+
+
+def _set_run_off(run, tag: str, val: str) -> None:
+    rPr = run._r.get_or_add_rPr()
+    el = OxmlElement(f"w:{tag}")
+    el.set(qn("w:val"), val)
+    rPr.append(el)
 
 
 def _add_hyperlink(paragraph, url: str, text: str):
@@ -318,6 +356,241 @@ class WordPreviewRegression(unittest.TestCase):
             byted = {r["bytes"] for r in results}
             self.assertEqual(len(byted), 1)
             self.assertFalse((cache / "preview.lock").exists())
+
+
+    def test_13_line_break_vs_literal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = Document()
+            p = doc.add_paragraph()
+            p.add_run("LINE-A")
+            _add_break(p.add_run())
+            p.add_run("LINE-B")
+            doc.add_paragraph("TEXT-WITH-LITERAL <br> INSIDE")
+            src = self._tmp_doc(Path(tmp))
+            doc.save(str(src))
+            html, _ = docx_to_html_string(src)
+            self.assertIn("LINE-A<br>LINE-B", html)
+            self.assertIn("TEXT-WITH-LITERAL &lt;br&gt; INSIDE", html)
+
+    def test_14_break_inside_hyperlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = Document()
+            p = doc.add_paragraph()
+            r_id = p.part.relate_to("https://example.com/x", RT.HYPERLINK, is_external=True)
+            link = OxmlElement("w:hyperlink")
+            link.set(qn("r:id"), r_id)
+            run = OxmlElement("w:r")
+            txt = OxmlElement("w:t")
+            txt.text = "CLICK-"
+            run.append(txt)
+            link.append(run)
+            run2 = OxmlElement("w:r")
+            txt2 = OxmlElement("w:t")
+            txt2.text = "HERE"
+            run2.append(txt2)
+            run2.append(OxmlElement("w:br"))
+            link.append(run2)
+            p._p.append(link)
+            src = self._tmp_doc(Path(tmp))
+            doc.save(str(src))
+            html, _ = docx_to_html_string(src)
+            self.assertIn('<a href="https://example.com/x">CLICK-HERE<br></a>', html)
+
+    def test_15_restart_zero_keeps_sequence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = Document()
+            _add_numbering(doc, 110, [(1, "decimal", "%1."), (1, "decimal", "%1.%2.")],
+                           110, restarts={1: "0"})
+            seq = [0, 1, 1, 0, 1]
+            for ilvl in seq:
+                p = doc.add_paragraph(f"R-{ilvl}")
+                _set_num_pr(p, 110, ilvl)
+            src = self._tmp_doc(Path(tmp))
+            doc.save(str(src))
+            html, _ = docx_to_html_string(src)
+            marks = re.findall(r'<span class="wnum">(.*?)</span>', html)
+            # Второй ilvl=1 подряд не перезапускается (уровень 0 не наступал),
+            # после нового уровня 0 — перезапуск.
+            self.assertEqual(marks, ["1.", "1.1.", "1.2.", "2.", "2.1."])
+
+    def test_16_explicit_restart_on_level(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = Document()
+            _add_numbering(doc, 111, [(1, "decimal", "%1."), (1, "decimal", "%1.%2."),
+                                     (1, "decimal", "%1.%2.%3.")],
+                           111, restarts={2: "0"})
+            seq = [0, 2, 1, 2]
+            for ilvl in seq:
+                p = doc.add_paragraph(f"E-{ilvl}")
+                _set_num_pr(p, 111, ilvl)
+            src = self._tmp_doc(Path(tmp))
+            doc.save(str(src))
+            html, _ = docx_to_html_string(src)
+            marks = re.findall(r'<span class="wnum">(.*?)</span>', html)
+            # Промежуточный уровень 1 НЕ перезапускает уровень 2 (restart=0):
+            # второй L2 продолжает счёт.
+            self.assertEqual(marks, ["1.", "1.1.1.", "1.1.", "1.1.2."])
+
+    def test_17_override_level_redefines_format(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = Document()
+            _add_numbering(doc, 112, [(1, "decimal", "%1.")], 112,
+                           overrides={0: 1},
+                           override_levels={0: ("lowerLetter", "(%1)")})
+            for _ in range(2):
+                doc.add_paragraph("OV")
+                _set_num_pr(doc.paragraphs[-1], 112, 0)
+            src = self._tmp_doc(Path(tmp))
+            doc.save(str(src))
+            html, _ = docx_to_html_string(src)
+            marks = re.findall(r'<span class="wnum">(.*?)</span>', html)
+            self.assertEqual(marks, ["(a)", "(b)"])
+
+    def test_18_partial_direct_numpr_with_style(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = Document()
+            _add_numbering(doc, 113, [(1, "decimal", "%1."), (1, "decimal", "%1.%2.")], 113)
+            style = doc.styles.add_style("SynPartial", WD_STYLE_TYPE.PARAGRAPH)
+            pPr = style.element.get_or_add_pPr()
+            numPr = OxmlElement("w:numPr")
+            nid = OxmlElement("w:numId")
+            nid.set(qn("w:val"), "113")
+            il = OxmlElement("w:ilvl")
+            il.set(qn("w:val"), "1")
+            numPr.append(il)
+            numPr.append(nid)
+            pPr.append(numPr)
+            p = doc.add_paragraph("PARTIAL-ONE", style="SynPartial")
+            _set_num_id_only(p, 113)  # прямой numId без ilvl + ilvl из стиля
+            src = self._tmp_doc(Path(tmp))
+            doc.save(str(src))
+            html, _ = docx_to_html_string(src)
+            marks = re.findall(r'<span class="wnum">(.*?)</span>', html)
+            self.assertEqual(marks, ["1.1."])
+
+    def test_19_header_uses_own_relationships(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = Document()
+            bp = doc.add_paragraph()
+            _add_hyperlink(bp, "https://body.example/x", "BODY-LINK")
+            bp.add_run().add_picture(io.BytesIO(PIXEL_PNG))
+            header = doc.sections[0].header
+            hp = header.paragraphs[0] if header.paragraphs else header.add_paragraph()
+            _add_hyperlink(hp, "https://header.example/y", "HEADER-LINK")
+            hp.add_run().add_picture(io.BytesIO(PIXEL_PNG))
+            src = self._tmp_doc(Path(tmp))
+            doc.save(str(src))
+            html, stats = docx_to_html_string(src)
+            self.assertIn('<a href="https://body.example/x">BODY-LINK</a>', html)
+            self.assertIn('<a href="https://header.example/y">HEADER-LINK</a>', html)
+            self.assertEqual(html.count("<img"), 2)
+
+    def test_20_first_page_header_flagged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = Document()
+            header = doc.sections[0].header
+            hp = header.paragraphs[0] if header.paragraphs else header.add_paragraph()
+            hp.text = "DEFAULT-HDR"
+            doc.sections[0].different_first_page_header_footer = True
+            sectPr = doc.sections[0]._sectPr
+            default_ref = sectPr.find(qn("w:headerReference"))
+            first_ref = OxmlElement("w:headerReference")
+            first_ref.set(qn("w:type"), "first")
+            first_ref.set(qn("r:id"), default_ref.get(qn("r:id")))
+            sectPr.append(first_ref)
+            src = self._tmp_doc(Path(tmp))
+            doc.save(str(src))
+            html, stats = docx_to_html_string(src)
+            self.assertIn("DEFAULT-HDR", html)
+            self.assertIn("first", stats.get("headersUnsupported", []))
+
+    def test_21_stale_cache_concurrent_regeneration(self):
+        import threading
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            doc = Document()
+            doc.add_paragraph("STALE-PARA")
+            src = tmp / "s.docx"
+            doc.save(str(src))
+            cache = tmp / "cache"
+            cache.mkdir(parents=True, exist_ok=True)
+            (cache / "preview.html").write_text("STALE-HTML", encoding="utf-8")
+            (cache / "preview.json").write_text(json.dumps({
+                "file": "preview.html", "bytes": 10,
+                "sourceMtimeNs": src.stat().st_mtime_ns,
+                "sourceSize": src.stat().st_size,
+                "cacheHit": True}), encoding="utf-8")
+            entered = threading.Event()
+            release = threading.Event()
+            real = engine_word.docx_to_html_string
+
+            def slow(src_path):
+                entered.set()
+                self.assertTrue(release.wait(timeout=30))
+                return real(src_path)
+
+            errors = []
+            import unittest.mock as mock
+            with mock.patch.object(engine_word, "docx_to_html_string", side_effect=slow):
+                def first():
+                    try:
+                        return ("ok", ensure_docx_preview(src, cache))
+                    except Exception as exc:  # noqa: BLE001
+                        return ("err", exc)
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                    fut1 = pool.submit(first)
+                    self.assertTrue(entered.wait(timeout=30))
+                    fut2 = pool.submit(first)
+                    release.set()
+                    kind1, res1 = fut1.result(timeout=60)
+                    kind2, res2 = fut2.result(timeout=60)
+            self.assertEqual((kind1, kind2), ("ok", "ok"))
+            self.assertEqual(res1["bytes"], res2["bytes"])
+            for res in (res1, res2):
+                self.assertEqual(res.get("renderVersion"), DOCX_HTML_RENDER_VERSION)
+            self.assertNotIn("STALE-HTML", (cache / "preview.html").read_text(encoding="utf-8"))
+
+    def test_22_corrupt_cache_regenerates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            doc = Document()
+            doc.add_paragraph("RECOVER-ME")
+            src = tmp / "r.docx"
+            doc.save(str(src))
+            cache = tmp / "cache"
+            cache.mkdir(parents=True, exist_ok=True)
+            (cache / "preview.html").write_text("", encoding="utf-8")
+            (cache / "preview.json").write_text("{not-json", encoding="utf-8")
+            meta = ensure_docx_preview(src, cache)
+            self.assertFalse(meta["cacheHit"])
+            self.assertGreater((cache / "preview.html").stat().st_size, 0)
+            again = ensure_docx_preview(src, cache)
+            self.assertTrue(again["cacheHit"])
+
+    def test_23_explicit_formatting_off(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = Document()
+            p = doc.add_paragraph()
+            r1 = p.add_run("BOLD-OFF")
+            _set_run_off(r1, "b", "false")
+            r2 = p.add_run("ITALIC-OFF")
+            _set_run_off(r2, "i", "off")
+            r3 = p.add_run("ULINE-NONE")
+            _set_run_off(r3, "u", "none")
+            r4 = p.add_run("BOLD-ON")
+            rpr = r4._r.get_or_add_rPr()
+            rpr.append(OxmlElement("w:b"))
+            src = self._tmp_doc(Path(tmp))
+            doc.save(str(src))
+            html, _ = docx_to_html_string(src)
+            self.assertNotIn("<b>BOLD-OFF</b>", html)
+            self.assertNotIn("<i>ITALIC-OFF</i>", html)
+            self.assertIn("BOLD-OFF", html)
+            self.assertIn("ITALIC-OFF", html)
+            self.assertIn("ULINE-NONE", html)
+            self.assertNotIn("<u>ULINE-NONE</u>", html)
+            self.assertIn("<b>BOLD-ON</b>", html)
 
 
 if __name__ == "__main__":
