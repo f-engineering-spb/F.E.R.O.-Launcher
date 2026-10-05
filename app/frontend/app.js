@@ -2255,15 +2255,20 @@ function nativeTypeLabel(ext) {
 }
 
 // S01: DOCX-карточка ленты → тот же быстрый HTML, что и одиночный клик.
-// Поздняя карточка (эпоха ушла) молча игнорируется.
 function activateWordHtmlCard(page, options = {}) {
   if (!page) return;
-  if (page.epoch != null && state.renderEpoch !== page.epoch) return;
   const filePath = page.previewFor?.path || page.sourcePath || "";
   const fileName = page.previewFor?.name || page.sourceName || page.name || "";
   if (!filePath) return;
+  // Повторный показ построенной карточки — действие пользователя: забираем
+  // свежую эпоху (сериализация параллельных кликов, как в previewFileDirectly).
+  // Эпоха самой карточки здесь НЕ проверяется: она устаревает при любом новом
+  // показе, а молчаливый отказ — это пустой экран без ошибки. Свежесть
+  // асинхронного ответа держит entryEpoch внутри showWordPreviewFast.
+  const owner = (state.renderEpoch || 0) + 1;
+  state.renderEpoch = owner;
   showWordPreviewFast({ path: filePath, name: fileName }, {
-    epoch: page.epoch ?? state.renderEpoch,
+    epoch: owner,
     fullView: Boolean(options?.fullView),
   });
 }
