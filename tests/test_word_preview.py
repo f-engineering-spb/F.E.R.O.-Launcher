@@ -39,6 +39,18 @@ PIXEL_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
 
 
+def _png_variant(marker: bytes) -> bytes:
+    """Другой валидный PNG: добавляется tEXt-чанк с меткой (для тестов подмены)."""
+    import binascii
+    import struct
+    body, iend = PIXEL_PNG[:-12], PIXEL_PNG[-12:]
+    assert iend[4:8] == b"IEND"
+    data = b"Comment\x00" + marker
+    chunk = struct.pack(">I", len(data)) + b"tEXt" + data
+    chunk += struct.pack(">I", binascii.crc32(b"tEXt" + data) & 0xFFFFFFFF)
+    return body + chunk + iend
+
+
 def _set_num_pr(paragraph, num_id: int, ilvl: int = 0) -> None:
     pPr = paragraph._p.get_or_add_pPr()
     old = pPr.find(qn("w:numPr"))
@@ -396,40 +408,90 @@ class WordPreviewRegression(unittest.TestCase):
             html, _ = docx_to_html_string(src)
             self.assertIn('<a href="https://example.com/x">CLICK-HERE<br></a>', html)
 
-    def test_15_restart_zero_keeps_sequence(self):
+    def test_15_restart_zero_never_restarts(self):
+        # Случай A из рецензии: lvlRestart=0 — уровень 1 никогда
+        # не перезапускается: 0/1/1/0/1 -> 1., 1.1., 1.2., 2., 2.3.
         with tempfile.TemporaryDirectory() as tmp:
             doc = Document()
-            _add_numbering(doc, 110, [(1, "decimal", "%1."), (1, "decimal", "%1.%2.")],
-                           110, restarts={1: "0"})
+            _add_numbering(doc, 120, [(1, "decimal", "%1."), (1, "decimal", "%1.%2.")],
+                           120, restarts={1: "0"})
             seq = [0, 1, 1, 0, 1]
             for ilvl in seq:
                 p = doc.add_paragraph(f"R-{ilvl}")
-                _set_num_pr(p, 110, ilvl)
+                _set_num_pr(p, 120, ilvl)
             src = self._tmp_doc(Path(tmp))
             doc.save(str(src))
             html, _ = docx_to_html_string(src)
             marks = re.findall(r'<span class="wnum">(.*?)</span>', html)
-            # Второй ilvl=1 подряд не перезапускается (уровень 0 не наступал),
-            # после нового уровня 0 — перезапуск.
-            self.assertEqual(marks, ["1.", "1.1.", "1.2.", "2.", "2.1."])
+            self.assertEqual(marks, ["1.", "1.1.", "1.2.", "2.", "2.3."])
 
     def test_16_explicit_restart_on_level(self):
+        # Случай C из рецензии: уровень 2, lvlRestart=1 (триггер ilvl 0):
+        # уровень 0 вызывает перезапуск, уровень 1 — нет.
         with tempfile.TemporaryDirectory() as tmp:
             doc = Document()
-            _add_numbering(doc, 111, [(1, "decimal", "%1."), (1, "decimal", "%1.%2."),
+            _add_numbering(doc, 121, [(1, "decimal", "%1."), (1, "decimal", "%1.%2."),
                                      (1, "decimal", "%1.%2.%3.")],
-                           111, restarts={2: "0"})
+                           121, restarts={2: "1"})
             seq = [0, 2, 1, 2]
             for ilvl in seq:
                 p = doc.add_paragraph(f"E-{ilvl}")
-                _set_num_pr(p, 111, ilvl)
+                _set_num_pr(p, 121, ilvl)
             src = self._tmp_doc(Path(tmp))
             doc.save(str(src))
             html, _ = docx_to_html_string(src)
             marks = re.findall(r'<span class="wnum">(.*?)</span>', html)
-            # Промежуточный уровень 1 НЕ перезапускает уровень 2 (restart=0):
-            # второй L2 продолжает счёт.
             self.assertEqual(marks, ["1.", "1.1.1.", "1.1.", "1.1.2."])
+
+    def test_24_absent_restart_from_previous_level(self):
+        # Случай D из рецензии: уровень 2 без lvlRestart перезапускается
+        # при использовании предыдущего уровня (ilvl 1).
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = Document()
+            _add_numbering(doc, 122, [(1, "decimal", "%1."), (1, "decimal", "%1.%2."),
+                                     (1, "decimal", "%1.%2.%3.")], 122)
+            seq = [0, 1, 2, 1, 2]
+            for ilvl in seq:
+                p = doc.add_paragraph(f"D-{ilvl}")
+                _set_num_pr(p, 122, ilvl)
+            src = self._tmp_doc(Path(tmp))
+            doc.save(str(src))
+            html, _ = docx_to_html_string(src)
+            marks = re.findall(r'<span class="wnum">(.*?)</span>', html)
+            self.assertEqual(marks, ["1.", "1.1.", "1.1.1.", "1.2.", "1.2.1."])
+
+    def test_25_restart_one_triggers_on_level_zero(self):
+        # Случай B из рецензии: уровень 1, lvlRestart=1 (триггер ilvl 0):
+        # после нового уровня 0 начинается заново.
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = Document()
+            _add_numbering(doc, 123, [(1, "decimal", "%1."), (1, "decimal", "%1.%2.")],
+                           123, restarts={1: "1"})
+            seq = [0, 1, 1, 0, 1]
+            for ilvl in seq:
+                p = doc.add_paragraph(f"T-{ilvl}")
+                _set_num_pr(p, 123, ilvl)
+            src = self._tmp_doc(Path(tmp))
+            doc.save(str(src))
+            html, _ = docx_to_html_string(src)
+            marks = re.findall(r'<span class="wnum">(.*?)</span>', html)
+            self.assertEqual(marks, ["1.", "1.1.", "1.2.", "2.", "2.1."])
+
+    def test_26_level_zero_never_self_restarts(self):
+        # Случай E из рецензии: последовательные пункты уровня 0
+        # не превращаются в повторяющиеся «1.» (нет сброса текущего уровня).
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = Document()
+            _add_numbering(doc, 124, [(1, "decimal", "%1.")], 124,
+                           restarts={0: "1"})
+            for _ in range(3):
+                p = doc.add_paragraph("Z")
+                _set_num_pr(p, 124, 0)
+            src = self._tmp_doc(Path(tmp))
+            doc.save(str(src))
+            html, _ = docx_to_html_string(src)
+            marks = re.findall(r'<span class="wnum">(.*?)</span>', html)
+            self.assertEqual(marks, ["1.", "2.", "3."])
 
     def test_17_override_level_redefines_format(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -470,20 +532,31 @@ class WordPreviewRegression(unittest.TestCase):
 
     def test_19_header_uses_own_relationships(self):
         with tempfile.TemporaryDirectory() as tmp:
+            body_png = _png_variant(b"body-image")
+            head_png = _png_variant(b"header-image")
             doc = Document()
             bp = doc.add_paragraph()
             _add_hyperlink(bp, "https://body.example/x", "BODY-LINK")
-            bp.add_run().add_picture(io.BytesIO(PIXEL_PNG))
+            bp.add_run().add_picture(io.BytesIO(body_png))
             header = doc.sections[0].header
             hp = header.paragraphs[0] if header.paragraphs else header.add_paragraph()
             _add_hyperlink(hp, "https://header.example/y", "HEADER-LINK")
-            hp.add_run().add_picture(io.BytesIO(PIXEL_PNG))
+            hp.add_run().add_picture(io.BytesIO(head_png))
             src = self._tmp_doc(Path(tmp))
             doc.save(str(src))
             html, stats = docx_to_html_string(src)
             self.assertIn('<a href="https://body.example/x">BODY-LINK</a>', html)
             self.assertIn('<a href="https://header.example/y">HEADER-LINK</a>', html)
-            self.assertEqual(html.count("<img"), 2)
+            body_b64 = base64.b64encode(body_png).decode()
+            head_b64 = base64.b64encode(head_png).decode()
+            self.assertNotEqual(body_b64, head_b64)
+            cut = html.find('class="word-header"')
+            self.assertGreater(cut, 0)
+            body_part, head_part = html[:cut], html[cut:]
+            self.assertIn(body_b64, body_part)
+            self.assertNotIn(head_b64, body_part)
+            self.assertIn(head_b64, head_part)
+            self.assertNotIn(body_b64, head_part)
 
     def test_20_first_page_header_flagged(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -522,29 +595,54 @@ class WordPreviewRegression(unittest.TestCase):
                 "cacheHit": True}), encoding="utf-8")
             entered = threading.Event()
             release = threading.Event()
+            locked = threading.Event()
+            waiting = threading.Event()
+            calls = {"n": 0}
             real = engine_word.docx_to_html_string
+            real_read = engine_word._read_valid_meta
+            real_acquire = engine_word._try_acquire_lock
 
             def slow(src_path):
                 entered.set()
                 self.assertTrue(release.wait(timeout=30))
                 return real(src_path)
 
+            def counting_read(meta_path, html_path, stat):
+                calls["n"] += 1
+                if locked.is_set() and calls["n"] >= 4:
+                    waiting.set()
+                return real_read(meta_path, html_path, stat)
+
+            def acquiring(cache_dir):
+                ok = real_acquire(cache_dir)
+                if ok:
+                    locked.set()
+                return ok
+
             errors = []
             import unittest.mock as mock
-            with mock.patch.object(engine_word, "docx_to_html_string", side_effect=slow):
+            with mock.patch.object(engine_word, "docx_to_html_string", side_effect=slow), \
+                 mock.patch.object(engine_word, "_read_valid_meta", side_effect=counting_read), \
+                 mock.patch.object(engine_word, "_try_acquire_lock", side_effect=acquiring):
                 def first():
                     try:
                         return ("ok", ensure_docx_preview(src, cache))
                     except Exception as exc:  # noqa: BLE001
+                        errors.append(exc)
                         return ("err", exc)
 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
                     fut1 = pool.submit(first)
                     self.assertTrue(entered.wait(timeout=30))
+                    self.assertTrue(locked.wait(timeout=30))
                     fut2 = pool.submit(first)
+                    # Второй поток подтверждённо вошёл в ожидание чужой
+                    # генерации — только затем отпускаем первый.
+                    self.assertTrue(waiting.wait(timeout=30))
                     release.set()
                     kind1, res1 = fut1.result(timeout=60)
                     kind2, res2 = fut2.result(timeout=60)
+            self.assertEqual(errors, [])
             self.assertEqual((kind1, kind2), ("ok", "ok"))
             self.assertEqual(res1["bytes"], res2["bytes"])
             for res in (res1, res2):

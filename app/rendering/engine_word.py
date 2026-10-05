@@ -30,7 +30,7 @@ WORD_COM_TIMEOUT_SECONDS = 120
 
 # Версия HTML-рендера DOCX. Поднимается при любом изменении выдачи docx_to_html_string.
 # ensure_docx_preview сверяет её в метаданных и не отдаёт старый HTML за новый.
-DOCX_HTML_RENDER_VERSION = 3
+DOCX_HTML_RENDER_VERSION = 4
 
 # Сколько секунд чужой lock-файл считается живым (защита от зависших генераций).
 CACHE_LOCK_STALE_SECONDS = 180
@@ -84,14 +84,20 @@ def _fmt_letters(value: int, upper: bool) -> str:
 class _Numbering:
     """Счётчики списков Word по определениям numbering.xml.
 
-    Состояние независимо для каждого numId (как в Word: каждый num — свой список).
-    Неподдержанные форматы фиксируются в self.unsupported, а не теряются молча.
+    Перезапуски уровней — по документации w:lvlRestart:
+    - 0 означает НИКОГДА не перезапускать этот уровень;
+    - положительное значение — 1-based номер уровня-триггера
+      (1 -> ilvl 0, 2 -> ilvl 1): уровень сбрасывается при его использовании;
+    - отсутствие атрибута — перезапуск при использовании высшего уровня;
+    - некорректные значения — без сброса (тоже никогда).
+    Текущий уровень при собственном наступлении никогда не сбрасывается.
+    Состояние независимо для каждого numId. Неподдержанные форматы фиксируются
+    в self.unsupported, а не теряются молча.
     """
 
     def __init__(self, doc, diagnostics: list):
         self._diag = diagnostics
         self._abstracts: dict = {}
-        self._abstract_has_restart: dict = {}
         self._nums: dict = {}
         self._counters: dict = {}
         self._last: tuple | None = None
@@ -102,19 +108,14 @@ class _Numbering:
         for abstract in numbering.findall(W + "abstractNum"):
             aid = abstract.get(W + "abstractNumId")
             levels = {}
-            has_restart = False
             for lvl in abstract.findall(W + "lvl"):
                 ilvl_raw = lvl.get(W + "ilvl")
                 try:
                     ilvl = int(ilvl_raw)
                 except (TypeError, ValueError):
                     continue
-                parsed = self._parse_level(lvl)
-                if parsed.get("lvlRestart") is not None:
-                    has_restart = True
-                levels[ilvl] = parsed
+                levels[ilvl] = self._parse_level(lvl)
             self._abstracts[aid] = levels
-            self._abstract_has_restart[aid] = has_restart
         for num in numbering.findall(W + "num"):
             nid = num.get(W + "numId")
             aid_el = num.find(W + "abstractNumId")
@@ -155,6 +156,23 @@ class _Numbering:
             "lvlRestart": get("lvlRestart"),
         }
 
+    def _restart_trigger(self, num_id, abstract_id, other: int) -> int | None:
+        """Уровень-триггер для сброса уровня other либо None (= никогда).
+
+        Учитывает вложенное переопределение уровня из lvlOverride.
+        """
+        definition = self._level_def(num_id, abstract_id, other)
+        raw = (definition or {}).get("lvlRestart")
+        if raw is None:
+            return other - 1 if other > 0 else None
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return None
+        if value <= 0:
+            return None
+        return value - 1
+
     def _level_def(self, num_id, abstract_id, ilvl):
         override = ((self._nums.get(str(num_id)) or {}).get("levels", {}) or {}).get(ilvl)
         if override is not None:
@@ -192,30 +210,12 @@ class _Numbering:
         level = int(ilvl) if ilvl is not None else 0
         state = self._counters.setdefault(str(num_id), {"levels": [None] * 9})
         counters = state["levels"]
-        # Перезапуски: уровень X сбрасывается, когда наступает уровень R из его
-        # lvlRestart; без атрибута — когда наступает любой более высокий уровень.
-        # lvlRestart=0 означает перезапуск при наступлении уровня 0 (а не «никогда»).
+        # Перезапуск уровня other — только когда наступает его триггер
+        # (_restart_trigger). Текущий уровень здесь никогда не сбрасывается.
         for other in range(9):
             if other == level:
-                definition_o = self._level_def(num_id, abstract_id, other)
-                restart_o = (definition_o or {}).get("lvlRestart")
-                try:
-                    restart_n = int(restart_o) if restart_o is not None else None
-                except ValueError:
-                    restart_n = None
-                if restart_n == level:
-                    counters[other] = None
                 continue
-            definition_o = self._level_def(num_id, abstract_id, other)
-            restart_o = (definition_o or {}).get("lvlRestart")
-            try:
-                restart_n = int(restart_o) if restart_o is not None else None
-            except ValueError:
-                restart_n = None
-            if restart_n is not None:
-                if restart_n == level:
-                    counters[other] = None
-            elif other > level:
+            if self._restart_trigger(num_id, abstract_id, other) == level:
                 counters[other] = None
 
         def level_start(idx: int) -> int:
