@@ -2287,6 +2287,9 @@ async function showWordPreviewPaginated(node, options = {}) {
 async function showWordPreviewFast(node, options = {}) {
   // Быстрый HTML-рендер DOCX через ядро rendering (~1 с вместо ~20 с COM).
   // При любой ошибке — фолбэк на старый COM-путь через PDF.
+  // Актуальность — по общей эпохе показов: поздний ответ чужого HTML-запроса
+  // не трогает экран, состояние и статус (включая обработчик ошибок).
+  const myEpoch = state.renderEpoch || 0;
   clearExcelViewer();
   resetPdfPreview();
   setActiveNativePath(node.path);
@@ -2314,6 +2317,7 @@ async function showWordPreviewFast(node, options = {}) {
       body: JSON.stringify({ file: node.path }),
     });
     const payload = await response.json();
+    if (state.renderEpoch !== myEpoch) return;
     if (!response.ok) throw new Error(payload.error || "Не удалось построить HTML-превью");
     state.wordDoc = { path: node.path, name: node.name, ...payload };
     const chip = document.createElement("span");
@@ -2323,6 +2327,7 @@ async function showWordPreviewFast(node, options = {}) {
     els.wordDocFrame.src = payload.url;
     finishProgress("Документ готов");
   } catch (error) {
+    if (state.renderEpoch !== myEpoch) return;
     console.warn("[Launcher] fast Word preview failed, fallback to COM:", error);
     const item = {
       ...node,
