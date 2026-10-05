@@ -3337,7 +3337,7 @@ const PDF_FETCH_TIMEOUT_MS = 300000;
 // скан на каждое изменение) и могли перезагружать дерево под руками. 10 минут.
 const DIFF_POLL_INTERVAL_MS = 600000;
 const PDF_PREVIEW_DPI = 150;
-const PDF_QUALITY_DPI = 300;
+const PDF_QUALITY_DPI = 150;
 
 function formatBytes(bytes) {
   if (!bytes || bytes <= 0) return "";
@@ -3577,6 +3577,10 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
     const isDwg = itemsToFetch[0]?.previewType === "DWG_MODEL";
     const isWord = itemsToFetch[0]?.previewType === "WORD";
     const isExcel = itemsToFetch[0]?.previewType === "EXCEL";
+    const isPdf = !isDwg && !isWord && !isExcel;
+    // S03: Прогрессивный показ (первая страница сразу, остальные в фоне той же эпохи):
+    // для PDF (S03) и Word (S01). Дедуп по pageKey предотвращает дублирование.
+    const progressivePasses = (isPdf || isWord) ? [true, false] : [false];
     // Облачный диск отвечает медленно: таймаут пачки масштабируем числом
     // файлов (до PDF_FETCH_TIMEOUT_MS), а оборванную по таймауту пачку
     // повторяем один раз — сервер тем временем продолжает рендер и греет
@@ -3584,9 +3588,11 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
     const batchTimeout = isDwg ? 600000 : isWord ? 180000 : isExcel ? 180000
       : Math.max(180000, Math.min(PDF_FETCH_TIMEOUT_MS, 60000 * Math.max(1, itemsToFetch.length)));
     let controller = null;
-    let attempt = 0;
     let batchDone = false;
-    while (!batchDone && attempt < 2) {
+    for (const firstOnlyPass of progressivePasses) {
+      if (state.progressCancelled || state.renderEpoch !== myEpoch) return;
+      let attempt = 0;
+      while (!batchDone && attempt < 2) {
       attempt += 1;
       if (attempt > 1 && !isSingle) {
         els.progressDetail.textContent = (isDwg && totalDwgFiles > 0)
@@ -3594,7 +3600,9 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
           : `PDF ${completedFiles} из ${itemsToRender.length} · повторная попытка: ${itemsToFetch[0]?.name || "пачка"}`;
       }
       if (attempt === 1 && isDwg && totalDwgFiles > 0 && !state.progressCancelled) {
-        els.progressDetail.textContent = `Модель ${completedDwgFiles + 1} из ${totalDwgFiles}: ${itemsToFetch[0]?.name || "чертёж"} — рендерится…`;
+        els.progressDetail.textContent = (isSingle && isPdf)
+          ? `${itemsToFetch[0]?.name || "Документ"} — загружаем первую страницу…`
+          : (isDwg ? `Модель ${completedDwgFiles + 1} из ${totalDwgFiles}: ${itemsToFetch[0]?.name || "чертёж"} — рендерится…` : els.progressDetail.textContent);
       }
     try {
       controller = new AbortController();
@@ -3612,7 +3620,7 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
       const requestBody = {
         files: itemsToFetch.map((file) => file.path),
         dpi: PDF_PREVIEW_DPI,
-        firstPageOnly: false,
+        firstPageOnly: firstOnlyPass,
       };
 
       const _batchT0 = performance.now();
@@ -3630,8 +3638,9 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
       beaconPerf("display-batch", performance.now() - _batchT0, `files=${itemsToFetch.length} hits=${_hits}/${itemsToFetch.length}`);
       if (!response.ok) {
         if (state.progressCancelled) return;
-        // Пачка целиком отклонена сервером (файл пропал, 400/500): считаем
-        // ошибкой, иначе финиш соврёт «Готово: 0 страниц» при пустой ленте.
+        // Первый проход упал: карточки не показываем — полный проход ниже
+        // сам разберётся и честно покажет ошибку, если она повторится.
+        if (firstOnlyPass) break;
         allErrors.push({
           document: itemsToFetch.map((f) => f.name).join(", "),
           error: payload.error || `HTTP ${response.status}`,
@@ -3649,8 +3658,11 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
         batchDone = true;
       } else {
         if (state.progressCancelled || state.renderEpoch !== myEpoch) return;
-        totalPages += payload.totalPages || 0;
-        renderedPages += payload.renderedPages || 0;
+        // Счётчики страниц обновляем только на полном проходе (или если файл 1-страничный)
+        if (!firstOnlyPass) {
+          totalPages += payload.totalPages || 0;
+          renderedPages += payload.renderedPages || 0;
+        }
         allErrors.push(...(payload.errors || []));
 
         const batchPages = payload.documents.flatMap((document) => {
@@ -3676,14 +3688,22 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
         });
         pageGroups[batchIndex] = batchPages;
         await appendPagesToViewer(batchPages, null, myEpoch);
+        if (firstOnlyPass) {
+          const allSingle = payload.documents && payload.documents.every((d) => (d.pages || 1) <= 1);
+          if (allSingle) {
+            totalPages += payload.totalPages || payload.documents.length;
+            renderedPages += payload.renderedPages || payload.documents.length;
+            batchDone = true;
+          }
+          break;
+        }
         batchDone = true;
       }
     } catch (error) {
       if (state.progressCancelled || state.renderEpoch !== myEpoch) return;
       const isTimeout = error?.name === "AbortError";
       if (isTimeout && attempt < 2) continue;
-      // Финальный провал пачки (включая повтор): тоже ошибка для честности
-      // финишной строки, иначе будет «Готово: 0 страниц» при пустой ленте.
+      if (firstOnlyPass) break; // Первый проход упал — идём на полный проход
       allErrors.push({
         document: itemsToFetch.map((f) => f.name).join(", "),
         error: isTimeout ? "timeout" : String(error?.message || error),
@@ -3710,7 +3730,8 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
         controller = null;
       }
     }
-  }
+    } // while attempt
+  } // for progressivePasses
   if (!state.progressCancelled && state.renderEpoch === myEpoch) {
     completedBatches += 1;
     completedFiles += batch.length;

@@ -100,7 +100,7 @@ def get_launcher_version_info() -> dict:
     except Exception:
         pass
     return {"version": APP_VERSION, "branch": APP_BRANCH}
-DEFAULT_PDF_DPI = 300
+DEFAULT_PDF_DPI = 150
 # Архитектурный стандарт (docs/CORE_ARCH_RULES.md): нарезка страниц чертежей
 # и превью — строго 150 DPI PNG. 300 DPI и WebP в дефолтном тракте запрещены
 # (нагрузка CPU/память без выигрыша читаемости на экране).
