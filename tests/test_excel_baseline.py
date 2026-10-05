@@ -153,6 +153,30 @@ class ExcelBaselineLosses(unittest.TestCase):
             self.assertNotIn(">101<", page)
             self.assertNotIn('class="notice"', page)
 
+    def test_empty_string_vs_hidden_zero(self):
+        """E01-A: пустая строка и скрытый ноль — разные случаи.
+
+        Формула с пустым строковым результатом показывает пустую
+        клетку (корректно), а ноль со скрывающим форматом `;;;`
+        показывает сырой `0` (формат игнорируется). Движок их не
+        различает как того требует семантика форматов.
+        """
+
+        def build(src: Path) -> None:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "S"
+            ws["A1"] = 5
+            ws["A2"] = '=IF(A1>10,"X","")'
+            ws["B1"] = 0
+            ws["B1"].number_format = ";;;"
+            wb.save(str(src))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, page = self._render_one(Path(tmp), "emptyzero.xlsx", build)
+            self.assertNotIn(">X<", page)
+            self.assertIn(">0<", page)
+
     def test_hidden_column_excluded_without_warning(self):
         def build(src: Path) -> None:
             wb = openpyxl.Workbook()
