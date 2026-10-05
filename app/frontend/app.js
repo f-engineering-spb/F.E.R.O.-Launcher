@@ -2227,12 +2227,48 @@ function clearExcelViewer() {
   clearWordViewer();
 }
 
+function recordGuiDiag(event, extra = {}) {
+  try {
+    const geom = (el) => {
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      const cs = window.getComputedStyle ? window.getComputedStyle(el) : {};
+      return {
+        top: Math.round(r.top),
+        bottom: Math.round(r.bottom),
+        width: Math.round(r.width),
+        height: Math.round(r.height),
+        disp: cs.display || "",
+        vis: cs.visibility || "",
+        hid: Boolean(el.hidden),
+      };
+    };
+    const payload = {
+      event,
+      epoch: state?.renderEpoch ?? null,
+      viewMode: state?.viewMode ?? "",
+      pdfViewer: geom(els?.pdfViewer),
+      pdfThumbs: geom(els?.pdfThumbs),
+      pdfStage: geom(els?.pdfStage),
+      wordViewer: geom(els?.wordViewer),
+      wordDocFrame: geom(els?.wordDocFrame),
+      ...extra,
+    };
+    fetch("/api/diag", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }).catch(() => {});
+  } catch (_) {}
+}
+
 function clearWordViewer() {
   state.wordDoc = null;
   if (els.wordViewer) els.wordViewer.hidden = true;
   if (els.wordDocTitle) { els.wordDocTitle.textContent = ""; els.wordDocTitle.title = ""; }
   if (els.wordMeta) els.wordMeta.replaceChildren();
   if (els.wordDocFrame) els.wordDocFrame.removeAttribute("src");
+  recordGuiDiag("clearWordViewer");
 }
 
 function formatFileSize(bytes) {
@@ -2279,12 +2315,14 @@ async function showWordPreviewFast(node, options = {}) {
   // R01: эпоха-владелец фиксируется на входе (явная из карточки ленты либо
   // текущая для одиночного клика — previewFileDirectly её поднимает выше).
   const entryEpoch = options.epoch ?? state.renderEpoch;
+  recordGuiDiag("showWordPreviewFast:enter", { entryEpoch, path: node.path });
   clearExcelViewer();
   resetPdfPreview();
   setActiveNativePath(node.path);
   state.revealedPath = node.path;
   if (options.fullView) setViewerMode("full");
   else setViewerMode("standard");
+  setStageActive(true);
   els.pdfViewer.classList.remove("empty");
   els.pdfPageImage.hidden = true;
   els.pdfPageImage.removeAttribute("src");
@@ -2298,6 +2336,7 @@ async function showWordPreviewFast(node, options = {}) {
   els.wordViewer.hidden = false;
   els.wordOpenNative.onclick = () => openFileByPath(node.path, "native");
   revealPathInTree(node.path);
+  recordGuiDiag("showWordPreviewFast:unhidden", { entryEpoch });
   try {
     startProgress("Документ Word (быстрое превью)", node.path);
     const response = await fetch("/api/word/preview", {
@@ -2308,15 +2347,22 @@ async function showWordPreviewFast(node, options = {}) {
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "Не удалось построить HTML-превью");
     // S01: поздний ответ (пользователь уже переключил документ) — не трогаем DOM.
-    if (state.renderEpoch !== entryEpoch) return;
+    if (state.renderEpoch !== entryEpoch) {
+      recordGuiDiag("showWordPreviewFast:stale_epoch", { entryEpoch, currentEpoch: state.renderEpoch });
+      return;
+    }
     state.wordDoc = { path: node.path, name: node.name, ...payload };
     const chip = document.createElement("span");
     chip.className = "excel-tab";
     chip.textContent = `${payload.paragraphs ?? "?"} абз. · ${payload.tables ?? "?"} табл. · ${formatFileSize(payload.bytes)}`;
     els.wordMeta.append(chip);
+    els.wordDocFrame.onload = () => recordGuiDiag("wordDocFrame:loaded", { url: els.wordDocFrame.src });
+    els.wordDocFrame.onerror = () => recordGuiDiag("wordDocFrame:error", { url: els.wordDocFrame.src });
     els.wordDocFrame.src = payload.url;
     finishProgress("Документ готов");
+    recordGuiDiag("showWordPreviewFast:done", { entryEpoch, url: payload.url });
   } catch (error) {
+    recordGuiDiag("showWordPreviewFast:error", { entryEpoch, error: String(error) });
     console.warn("[Launcher] fast Word preview failed, fallback to COM:", error);
     // R01: поздняя ошибка тоже не уводит показ на фолбэк чужого документа.
     if (state.renderEpoch !== entryEpoch) return;
@@ -2378,6 +2424,7 @@ function resetPdfPreview() {
   state.renderedPages = [];
   state.activeTxtPath = "";
   if (els.txtViewer) els.txtViewer.hidden = true;
+  clearWordViewer();
   // Новый показ стирает ленту целиком: старые миниатюры не смешиваются с новыми.
   els.pdfThumbs.replaceChildren();
   els.pdfPageImage.hidden = true;

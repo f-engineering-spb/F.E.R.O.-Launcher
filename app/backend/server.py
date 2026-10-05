@@ -3832,6 +3832,23 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
             return
 
+        if parsed.path == "/api/diag":
+            try:
+                body = self.read_json()
+                logs_dir = RUNTIME_DIR / "logs"
+                logs_dir.mkdir(parents=True, exist_ok=True)
+                diag_file = logs_dir / "gui_diag.log"
+                entry = {
+                    "at": datetime.now().isoformat(timespec="milliseconds"),
+                    **body,
+                }
+                with diag_file.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                self.send_json(HTTPStatus.OK, {"ok": True})
+            except Exception as error:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+            return
+
         if parsed.path == "/api/updates/apply":
             # Запуск скачивания и обновления в фоновом потоке, чтобы сразу вернуть ответ браузеру
             import threading

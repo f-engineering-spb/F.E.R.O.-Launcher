@@ -126,6 +126,8 @@ class TestStartupGate(unittest.TestCase):
         self._orig_shutdown = fl.shutdown_server
         self._orig_browser = fl.open_browser_window
         self._orig_error = fl.show_startup_error
+        self._orig_atexit = fl.atexit.register
+        fl.atexit.register = lambda *a, **k: None
         fl.shutdown_server = lambda *a, **k: self.shutdown_calls.append((a, k))
         fl.open_browser_window = lambda *a, **k: self.browser_calls.append((a, k))
         fl.show_startup_error = lambda *a, **k: self.error_calls.append((a, k))
@@ -135,6 +137,7 @@ class TestStartupGate(unittest.TestCase):
         self.fl.shutdown_server = self._orig_shutdown
         self.fl.open_browser_window = self._orig_browser
         self.fl.show_startup_error = self._orig_error
+        self.fl.atexit.register = self._orig_atexit
         if self._old_webview is None:
             sys.modules.pop("webview", None)
         else:

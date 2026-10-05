@@ -1008,6 +1008,10 @@ textarea:focus {
   overflow-x: hidden;
 }
 
+.shell:not(.full-view) .pdf-viewer:has(.excel-viewer:not([hidden])) .pdf-thumbs {
+  display: none !important;
+}
+
 .shell:not(.full-view) .pdf-viewer .pdf-stage:not(:has(.excel-viewer:not([hidden]))) {
   display: none !important;
 }

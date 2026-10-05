@@ -66,6 +66,46 @@ class WordHtmlConnection(unittest.TestCase):
             self.assertFalse(again.get("cacheHit"))
             self.assertNotEqual(before.read_bytes(), first_bytes)
 
+    def test_css_pdf_thumbs_hidden_when_excel_viewer_active(self):
+        css_file = ROOT / "app" / "frontend" / "styles.css"
+        css_text = css_file.read_text(encoding="utf-8")
+        # Ensure that when excel-viewer (or wordViewer) is visible, pdf-thumbs is hidden
+        # so pdf-stage is not pushed down below the overflow container.
+        self.assertIn(".shell:not(.full-view) .pdf-viewer:has(.excel-viewer:not([hidden])) .pdf-thumbs", css_text)
+        self.assertIn(".shell:not(.full-view) .pdf-viewer .pdf-stage:has(.excel-viewer:not([hidden]))", css_text)
+
+    def test_diag_endpoint_appends_log(self):
+        from http.server import ThreadingHTTPServer
+        import json
+        import threading
+        import urllib.request
+        from unittest.mock import patch
+        from app.backend.server import LauncherHandler
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            with patch("app.backend.server.RUNTIME_DIR", tmp_path):
+                server = ThreadingHTTPServer(("127.0.0.1", 0), LauncherHandler)
+                port = server.server_port
+                t = threading.Thread(target=server.serve_forever, daemon=True)
+                t.start()
+                try:
+                    req = urllib.request.Request(
+                        f"http://127.0.0.1:{port}/api/diag",
+                        data=json.dumps({"event": "unit_test_event"}).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        self.assertEqual(resp.status, 200)
+                    diag_file = tmp_path / "logs" / "gui_diag.log"
+                    self.assertTrue(diag_file.exists())
+                    log_content = diag_file.read_text(encoding="utf-8")
+                    self.assertIn("unit_test_event", log_content)
+                finally:
+                    server.shutdown()
+                    server.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()
