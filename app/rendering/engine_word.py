@@ -159,7 +159,11 @@ class _Numbering:
     def _restart_trigger(self, num_id, abstract_id, other: int) -> int | None:
         """Уровень-триггер для сброса уровня other либо None (= никогда).
 
-        Учитывает вложенное переопределение уровня из lvlOverride.
+        По Microsoft Open XML триггером может быть только существующий высший
+        уровень: 0 <= trigger < other. Значение 0, отрицательные, нечисловые,
+        указывающие на несуществующий уровень (val > 9) либо на текущий
+        и более глубокие уровни — недопустимы и дают «никогда» (с записью
+        в диагностику). Учитывает вложенное переопределение уровня из lvlOverride.
         """
         definition = self._level_def(num_id, abstract_id, other)
         raw = (definition or {}).get("lvlRestart")
@@ -168,10 +172,16 @@ class _Numbering:
         try:
             value = int(raw)
         except (TypeError, ValueError):
+            self._diag.append(f"lvlRestart:{raw} не число (numId={num_id} ilvl={other}) — без сброса")
             return None
         if value <= 0:
             return None
-        return value - 1
+        trigger = value - 1
+        if trigger < 0 or trigger >= other or trigger > 8:
+            self._diag.append(
+                f"lvlRestart:{raw} недопустим для ilvl={other} (numId={num_id}) — без сброса")
+            return None
+        return trigger
 
     def _level_def(self, num_id, abstract_id, ilvl):
         override = ((self._nums.get(str(num_id)) or {}).get("levels", {}) or {}).get(ilvl)

@@ -691,5 +691,26 @@ class WordPreviewRegression(unittest.TestCase):
             self.assertIn("<b>BOLD-ON</b>", html)
 
 
+    def test_27_invalid_trigger_never_restarts(self):
+        # Недопустимый для уровня триггер (уровень 1, lvlRestart=3 —
+        # триггер ilvl 2 глубже текущего): сброса нет, запись в диагностике.
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = Document()
+            _add_numbering(doc, 125, [(1, "decimal", "%1."), (1, "decimal", "%1.%2."),
+                                     (1, "decimal", "%1.%2.%3.")],
+                           125, restarts={1: "3"})
+            seq = [0, 1, 2, 1]
+            for ilvl in seq:
+                p = doc.add_paragraph(f"X-{ilvl}")
+                _set_num_pr(p, 125, ilvl)
+            src = self._tmp_doc(Path(tmp))
+            doc.save(str(src))
+            html, stats = docx_to_html_string(src)
+            marks = re.findall(r'<span class="wnum">(.*?)</span>', html)
+            self.assertEqual(marks, ["1.", "1.1.", "1.1.1.", "1.2."])
+            diags = stats.get("numberingUnsupported", [])
+            self.assertTrue(any("lvlRestart:3" in d for d in diags), diags)
+
+
 if __name__ == "__main__":
     unittest.main()
