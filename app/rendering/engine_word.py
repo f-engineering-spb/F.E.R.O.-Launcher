@@ -18,6 +18,7 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -1054,6 +1055,9 @@ def ensure_word_pdf(src: Path, target_dir: Path, cache_key: str,
     """COM→PDF с дисковым кэшем (порт word_to_pdf из server.py 1:1 по семантике).
 
     Манифест и именование PDF идентичны старым, старые кэши переиспользуются.
+    Параллельные запросы одного документа сериализуются per-каталог блокировкой
+    (внутри процесса; сервер многопоточный) — повторных COM-экспортов нет.
+    Манифест пишется атомарно.
     """
     from datetime import datetime as _dt
     if not src.exists():
@@ -1065,19 +1069,11 @@ def ensure_word_pdf(src: Path, target_dir: Path, cache_key: str,
     target_dir.mkdir(parents=True, exist_ok=True)
     pdf_path = target_dir / f"{src.stem}.pdf"
     manifest_path = target_dir / "manifest.json"
-    if pdf_path.exists() and pdf_path.stat().st_size > 0 and manifest_path.exists():
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if (manifest.get("sourcePath") == str(src)
-                    and manifest.get("cacheKey") == cache_key
-                    and manifest.get("sourceMtimeNs") == src.stat().st_mtime_ns
-                    and manifest.get("sourceSize") == src.stat().st_size):
-                return pdf_path, True
-        except (OSError, json.JSONDecodeError):
-            pass
-    info = word_to_pdf_via_com(src, pdf_path, convert_script, timeout)
-    manifest_path.write_text(
-        json.dumps(
+    with _wordpdf_lock(target_dir):
+        if _read_valid_word_manifest(manifest_path, pdf_path, src, cache_key):
+            return pdf_path, True
+        info = word_to_pdf_via_com(src, pdf_path, convert_script, timeout)
+        _atomic_write_bytes(manifest_path, json.dumps(
             {
                 "sourcePath": str(src),
                 "sourceName": src.name,
@@ -1089,10 +1085,37 @@ def ensure_word_pdf(src: Path, target_dir: Path, cache_key: str,
             },
             ensure_ascii=False,
             indent=2,
-        ),
-        encoding="utf-8",
-    )
-    return Path(info["pdf"]), False
+        ).encode("utf-8"))
+        return Path(info["pdf"]), False
+
+
+def _wordpdf_lock(target_dir: Path) -> threading.Lock:
+    """Per-каталог блокировка COM-экспорта (без общей блокировки всех документов)."""
+    key = str(target_dir)
+    with _WORDPDF_LOCKS_GUARD:
+        lock = _WORDPDF_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _WORDPDF_LOCKS[key] = lock
+        return lock
+
+
+def _read_valid_word_manifest(manifest_path: Path, pdf_path: Path,
+                              src: Path, cache_key: str) -> bool:
+    if not (pdf_path.exists() and pdf_path.stat().st_size > 0 and manifest_path.exists()):
+        return False
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return (manifest.get("sourcePath") == str(src)
+            and manifest.get("cacheKey") == cache_key
+            and manifest.get("sourceMtimeNs") == src.stat().st_mtime_ns
+            and manifest.get("sourceSize") == src.stat().st_size)
+
+
+_WORDPDF_LOCKS: dict = {}
+_WORDPDF_LOCKS_GUARD = threading.Lock()
 
 
 def word_to_pdf_via_com(src: Path, dst_pdf: Path, convert_script: Path,

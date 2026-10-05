@@ -1292,9 +1292,11 @@ async function previewFileDirectly(node, options = {}) {
     return;
   }
 
-  // 1a. DOCX: быстрый HTML через ядро rendering (без Word COM).
+  // 1a. DOCX: постраничный путь Word COM → PDF → PNG (миниатюры 150 dpi,
+  // выбранная страница 300 dpi по запросу). Быстрый HTML — запасной путь
+  // при недоступности Word COM.
   if (ext === "DOCX") {
-    await showWordPreviewFast(node, options);
+    await showWordPreviewPaginated(node, options);
     return;
   }
 
@@ -2248,6 +2250,31 @@ function nativeTypeLabel(ext) {
   if (["PPT", "PPTX"].includes(e)) return "Презентация";
   if (["VSD", "VSDX"].includes(e)) return "Схема Visio";
   return `Файл .${e.toLowerCase()}`;
+}
+
+async function showWordPreviewPaginated(node, options = {}) {
+  // Постраничный просмотр DOCX через Word COM → PDF → PNG: лента миниатюр
+  // 150 dpi сразу, выбранная страница 300 dpi — по запросу из того же PDF.
+  // Быстрый HTML (showWordPreviewFast) остаётся запасным путём, если COM
+  // недоступен. Устаревший результат чужого запроса текущий выбор не подменяет:
+  // WTOK-метка плюс проверка активного документа перед фолбэком.
+  const item = {
+    ...node,
+    previewType: "WORD",
+    previewFor: { type: "DOCX", name: node.name, path: node.path },
+  };
+  const normPath = node.path.replace(/\//g, "\\").toLowerCase();
+  const myToken = (state.wordPaginatedToken = (state.wordPaginatedToken || 0) + 1);
+  await renderSelectedPdfFiles([item], { singleFile: true, fullView: options.fullView });
+  if (state.wordPaginatedToken !== myToken) return;
+  const pages = (state.renderedPages || []).filter((p) => String(p.sourcePath || p.documentPath || "").replace(/\//g, "\\").toLowerCase() === normPath);
+  const okPages = pages.filter((p) => p.type !== "missing-preview" && p.url);
+  if (okPages.length) return;
+  const sel = state.selectedPaths ? Array.from(state.selectedPaths) : [];
+  const stillSelected = sel.some((s) => String(s || "").replace(/\//g, "\\").toLowerCase() === normPath);
+  const stillRevealed = state.revealedPath && String(state.revealedPath).replace(/\//g, "\\").toLowerCase() === normPath;
+  if (!stillSelected && !stillRevealed) return;
+  await showWordPreviewFast(node, options);
 }
 
 async function showWordPreviewFast(node, options = {}) {
@@ -3518,10 +3545,11 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
 
   const firstItem = itemsToRender[0];
   const isCloud = (firstItem?.path || "").startsWith("H:") || (firstItem?.path || "").includes("Общие диски");
+  const isSingleWord = isSingle && firstItem?.previewType === "WORD";
   const singleDetail = `${firstItem?.name || "Файл"} — создаём страницы для просмотра${isCloud ? " · Файл расположен в облачном диске" : ""}`;
 
   startProgress(
-    isSingle ? "Подготовка документа" : "Подготовка превью",
+    isSingleWord ? "Подготовка предпросмотра Word…" : isSingle ? "Подготовка документа" : "Подготовка превью",
     isSingle ? singleDetail : `${itemsToRender.length} файлов · подготовка...`
   );
   // Ensure UI updates before heavy processing
