@@ -49,10 +49,12 @@ if _backend_dir not in sys.path:
 
 try:
     from app.rendering import dispatcher as rendering_dispatcher
+    from app.rendering import engine_dwg as _engine_dwg
     from app.rendering import engine_excel as _engine_excel
     from app.rendering import engine_word as _engine_word
 except Exception:  # ядро rendering опционально: сервер стартует и без него
     rendering_dispatcher = None
+    _engine_dwg = None
     _engine_excel = None
     _engine_word = None
 RUNTIME_DIR = REPO_ROOT / "runtime"
@@ -993,6 +995,13 @@ def dwg_to_model_pdf(path: Path) -> tuple[Path, bool]:
         except OSError:
             pass
 
+    # 2. Быстрый нативный движок engine_dwg (accoreconsole / persistent cache)
+    if _engine_dwg is not None:
+        try:
+            return _engine_dwg.ensure_dwg_pdf(path, cache_root_dir=RUNTIME_DIR / "cache")
+        except Exception as _edwg_err:
+            pass
+
     # 2. Проверяем резервный кэш
     key = file_cache_key(path, "dwg-smart-cad-v2")
     target_dir = DWG_CACHE_DIR / key
@@ -1089,7 +1098,7 @@ _DWG_BG_LOCK = threading.Lock()
 _DWG_BG_ACTIVE: set[str] = set()
 
 
-def render_dwg_model(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
+def render_dwg_model(path: Path, dpi: int = DEFAULT_PDF_DPI, first_page_only: bool = False) -> dict:
     if not path.exists():
         return {
             "name": path.name,
@@ -1152,7 +1161,7 @@ def render_dwg_model(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
 
     # 2. Рендерим качественную модель DWG через векторный PDF (экспорт или печать)
     pdf_path, convert_cache_hit = dwg_to_model_pdf(path)
-    document = render_pdf(pdf_path, dpi=dpi, page_timeout_seconds=DWG_MODEL_PAGE_TIMEOUT_SECONDS)
+    document = render_pdf(pdf_path, dpi=dpi, page_timeout_seconds=DWG_MODEL_PAGE_TIMEOUT_SECONDS, first_page_only=first_page_only)
     document["name"] = path.name
     document["sourcePath"] = str(path)
     document["sourceName"] = path.name
@@ -3528,14 +3537,15 @@ class LauncherHandler(BaseHTTPRequestHandler):
             try:
                 body = self.read_json()
                 raw_files = body.get("files", [])
-                dpi = int(body.get("dpi") or DEFAULT_PDF_DPI)
+                dpi = int(body.get("dpi") or DWG_PREVIEW_DPI)
                 if dpi < 72 or dpi > 600:
                     raise ValueError("DPI должен быть в диапазоне 72-600")
                 if not isinstance(raw_files, list) or not raw_files:
                     raise ValueError("Не выбраны DWG-файлы для отображения")
                 if len(raw_files) > 1:
                     raise ValueError("Model Space preview пока создаётся по одному DWG-файлу")
-                documents = [render_dwg_model(Path(str(file_path)), dpi=dpi) for file_path in raw_files]
+                first_page_only = bool(body.get("firstPageOnly", False))
+                documents = [render_dwg_model(Path(str(file_path)), dpi=dpi, first_page_only=first_page_only) for file_path in raw_files]
                 document_errors = [
                     {"document": document["name"], "path": document["path"], **error}
                     for document in documents

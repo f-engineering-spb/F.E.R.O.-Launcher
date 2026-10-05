@@ -3577,6 +3577,9 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
     const isDwg = itemsToFetch[0]?.previewType === "DWG_MODEL";
     const isWord = itemsToFetch[0]?.previewType === "WORD";
     const isExcel = itemsToFetch[0]?.previewType === "EXCEL";
+    // DWG: сначала быстрая первая страница для мгновенного первого просмотра,
+    // затем полный проход в фоне для остальных листов чертежа.
+    const dwgFirstOnlyPasses = isDwg ? [true, false] : [false];
     // Облачный диск отвечает медленно: таймаут пачки масштабируем числом
     // файлов (до PDF_FETCH_TIMEOUT_MS), а оборванную по таймауту пачку
     // повторяем один раз — сервер тем временем продолжает рендер и греет
@@ -3584,9 +3587,11 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
     const batchTimeout = isDwg ? 600000 : isWord ? 180000 : isExcel ? 180000
       : Math.max(180000, Math.min(PDF_FETCH_TIMEOUT_MS, 60000 * Math.max(1, itemsToFetch.length)));
     let controller = null;
-    let attempt = 0;
     let batchDone = false;
-    while (!batchDone && attempt < 2) {
+    for (const firstOnlyPass of dwgFirstOnlyPasses) {
+      if (state.progressCancelled || state.renderEpoch !== myEpoch) return;
+      let attempt = 0;
+      while (!batchDone && attempt < 2) {
       attempt += 1;
       if (attempt > 1 && !isSingle) {
         els.progressDetail.textContent = (isDwg && totalDwgFiles > 0)
@@ -3612,7 +3617,7 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
       const requestBody = {
         files: itemsToFetch.map((file) => file.path),
         dpi: PDF_PREVIEW_DPI,
-        firstPageOnly: false,
+        firstPageOnly: firstOnlyPass,
       };
 
       const _batchT0 = performance.now();
@@ -3630,6 +3635,7 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
       beaconPerf("display-batch", performance.now() - _batchT0, `files=${itemsToFetch.length} hits=${_hits}/${itemsToFetch.length}`);
       if (!response.ok) {
         if (state.progressCancelled) return;
+        if (firstOnlyPass) break;
         // Пачка целиком отклонена сервером (файл пропал, 400/500): считаем
         // ошибкой, иначе финиш соврёт «Готово: 0 страниц» при пустой ленте.
         allErrors.push({
@@ -3649,8 +3655,10 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
         batchDone = true;
       } else {
         if (state.progressCancelled || state.renderEpoch !== myEpoch) return;
-        totalPages += payload.totalPages || 0;
-        renderedPages += payload.renderedPages || 0;
+        if (!firstOnlyPass) {
+          totalPages += payload.totalPages || 0;
+          renderedPages += payload.renderedPages || 0;
+        }
         allErrors.push(...(payload.errors || []));
 
         const batchPages = payload.documents.flatMap((document) => {
@@ -3676,12 +3684,18 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
         });
         pageGroups[batchIndex] = batchPages;
         await appendPagesToViewer(batchPages, null, myEpoch);
+        if (firstOnlyPass) {
+          const docPages = payload.documents?.[0]?.pages || 1;
+          if (docPages <= 1) { batchDone = true; }
+          break;
+        }
         batchDone = true;
       }
     } catch (error) {
       if (state.progressCancelled || state.renderEpoch !== myEpoch) return;
       const isTimeout = error?.name === "AbortError";
       if (isTimeout && attempt < 2) continue;
+      if (firstOnlyPass) break;
       // Финальный провал пачки (включая повтор): тоже ошибка для честности
       // финишной строки, иначе будет «Готово: 0 страниц» при пустой ленте.
       allErrors.push({
@@ -3710,7 +3724,8 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
         controller = null;
       }
     }
-  }
+    } // end while
+    } // end for firstOnlyPasses
   if (!state.progressCancelled && state.renderEpoch === myEpoch) {
     completedBatches += 1;
     completedFiles += batch.length;

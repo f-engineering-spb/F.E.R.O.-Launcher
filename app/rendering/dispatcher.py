@@ -14,7 +14,7 @@ import hashlib
 from pathlib import Path
 
 from . import GOLDEN_EXTENSIONS, NATIVE_APP_EXTENSIONS
-from . import engine_dwg_pdf, engine_excel, engine_media, engine_word
+from . import engine_dwg, engine_dwg_pdf, engine_excel, engine_media, engine_word
 
 RENDER_CACHE_NS = "rendering"
 
@@ -83,15 +83,8 @@ def get_file_preview(path: str | Path, runtime_dir: Path | None = None,
                 "firstPage": info, "cacheKey": info.get("cacheKey", key)}
 
     if ext == ".dwg":
-        # DWG→PDF готовит существующий DWG-конвейер; здесь — стандарт растра.
-        pdf_hint = params.get("pdf_path")
-        if pdf_hint and Path(pdf_hint).is_file():
-            info = engine_dwg_pdf.render_first_page(Path(pdf_hint), root / "dwg")
-            return {"type": "dwg", "name": src.name, "path": str(src),
-                    "via": "dwg-pdf", "firstPage": info}
-        return {"type": "dwg", "name": src.name, "path": str(src),
-                "via": "dwg-pdf-pipeline",
-                "hint": "DWG→PDF готовит DWG-демон, растр — engine_dwg_pdf (150 DPI PNG)"}
+        dpi = int(params.get("dpi") or engine_dwg.DEFAULT_DWG_DPI)
+        return engine_dwg.get_dwg_preview(src, cache_root_dir=root, dpi=dpi)
 
     if ext in (".xlsx", ".xlsm"):
         key = file_key(src, "excel-html")
