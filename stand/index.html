@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Стенд сравнения PDF: PDF.js vs PyMuPDF PNG (PDF-VIEWER-COMPARE-001)</title>
+  <style>
+    :root {
+      --bg: #1e1e24;
+      --panel-bg: #282830;
+      --card-bg: #32323e;
+      --accent: #ff6b35;
+      --accent-hover: #ff8552;
+      --text: #f4f4f6;
+      --text-muted: #a0a0ab;
+      --border: #444452;
+      --success: #4ecdc4;
+      --warning: #ffe66d;
+      --danger: #ff6b6b;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+    header {
+      background: var(--panel-bg);
+      border-bottom: 1px solid var(--border);
+      padding: 10px 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    h1 { font-size: 1.15rem; font-weight: 600; }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      font-size: 0.75rem;
+      border-radius: 4px;
+      background: var(--accent);
+      color: #fff;
+      margin-left: 10px;
+    }
+    .badge-secondary { background: #555566; }
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 0.85rem;
+    }
+    select, button, input {
+      background: var(--card-bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 6px 12px;
+      border-radius: 4px;
+      font-size: 0.85rem;
+      cursor: pointer;
+    }
+    button:hover { background: #3c3c4a; }
+    button.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+    button.primary:hover { background: var(--accent-hover); }
+    .main-layout {
+      display: flex;
+      flex: 1;
+      height: calc(100vh - 55px);
+      overflow: hidden;
+    }
+    .sidebar {
+      width: 320px;
+      background: var(--panel-bg);
+      border-right: 1px solid var(--border);
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      overflow-y: auto;
+    }
+    .section-title {
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+    .file-item {
+      padding: 8px 12px;
+      background: var(--card-bg);
+      border-radius: 4px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      margin-bottom: 6px;
+      transition: all 0.2s;
+    }
+    .file-item:hover { border-color: var(--border); }
+    .file-item.active { border-color: var(--accent); background: #3b3338; }
+    .file-name { font-weight: 500; font-size: 0.85rem; word-break: break-all; }
+    .file-meta { font-size: 0.75rem; color: var(--text-muted); margin-top: 4px; }
+    .mode-selector {
+      display: flex;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .mode-btn {
+      flex: 1;
+      border: none;
+      border-radius: 0;
+      background: var(--card-bg);
+      padding: 8px 4px;
+      font-size: 0.8rem;
+      text-align: center;
+    }
+    .mode-btn.active {
+      background: var(--accent);
+      color: #fff;
+      font-weight: bold;
+    }
+    .stats-card {
+      background: var(--card-bg);
+      border-radius: 6px;
+      padding: 12px;
+      border: 1px solid var(--border);
+    }
+    .stat-row {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 6px;
+      font-size: 0.8rem;
+    }
+    .stat-label { color: var(--text-muted); }
+    .stat-val { font-family: monospace; font-weight: bold; }
+    .stat-val.highlight { color: var(--success); }
+    .content-area {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      background: #141418;
+      overflow: hidden;
+    }
+    .viewport-controls {
+      background: var(--panel-bg);
+      border-bottom: 1px solid var(--border);
+      padding: 8px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 0.85rem;
+    }
+    .viewport {
+      flex: 1;
+      overflow: auto;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      padding: 24px;
+      position: relative;
+    }
+    .viewer-container {
+      position: relative;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+      background: #fff;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      max-width: 100%;
+    }
+    canvas#pdfjs-canvas {
+      display: block;
+      max-width: 100%;
+    }
+    img#png-image {
+      display: block;
+      max-width: 100%;
+      height: auto;
+    }
+    .benchmark-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.75rem;
+      margin-top: 8px;
+    }
+    .benchmark-table th, .benchmark-table td {
+      border: 1px solid var(--border);
+      padding: 4px 6px;
+      text-align: left;
+    }
+    .benchmark-table th { background: #22222a; color: var(--text-muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <div style="display: flex; align-items: center;">
+      <h1>PDF-VIEWER-COMPARE-001</h1>
+      <span class="badge">Stand v1.0</span>
+      <span class="badge badge-secondary" id="engine-status">Ready</span>
+    </div>
+    <div class="toolbar">
+      <span>Режим:</span>
+      <div class="mode-selector">
+        <button class="mode-btn active" id="btn-mode-png" onclick="setMode('png')">Mode A: PNG</button>
+        <button class="mode-btn" id="btn-mode-pdfjs" onclick="setMode('pdfjs')">Mode B: PDF.js</button>
+        <button class="mode-btn" id="btn-mode-hybrid" onclick="setMode('hybrid')">Mode C: Hybrid</button>
+      </div>
+      <button onclick="runAutoBenchmark()" class="primary">Запустить Бенчмарк (5x)</button>
+      <button onclick="clearServerCache()">Очистить Кэш</button>
+    </div>
+  </header>
+
+  <div class="main-layout">
+    <div class="sidebar">
+      <div>
+        <div class="section-title">Тестовые Файлы (Samples)</div>
+        <div id="samples-list">Загрузка списка...</div>
+      </div>
+
+      <div>
+        <div class="section-title">Метрики Текущего Рендера</div>
+        <div class="stats-card">
+          <div class="stat-row">
+            <span class="stat-label">Режим рендера:</span>
+            <span class="stat-val" id="stat-mode">PNG (PyMuPDF)</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Подготовка/Загрузка:</span>
+            <span class="stat-val" id="stat-prep">0 ms</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Первый видимый кадр (Paint):</span>
+            <span class="stat-val highlight" id="stat-first-paint">0 ms</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Полный рендер (Full):</span>
+            <span class="stat-val" id="stat-full">0 ms</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Источник / Кэш:</span>
+            <span class="stat-val" id="stat-cache">-</span>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <div class="section-title">Сводка Бенчмарка</div>
+        <div style="max-height: 200px; overflow-y: auto;">
+          <table class="benchmark-table" id="results-table">
+            <thead>
+              <tr>
+                <th>Sample</th>
+                <th>Mode</th>
+                <th>Cold (Paint)</th>
+                <th>Warm (Paint)</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td colspan="4" style="text-align: center; color: var(--text-muted);">Нет данных</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="content-area">
+      <div class="viewport-controls">
+        <div style="display: flex; gap: 8px; align-items: center;">
+          <button onclick="prevPage()">◀ Пред.</button>
+          <span>Страница <strong id="cur-page">1</strong> из <span id="total-pages">1</span></span>
+          <button onclick="nextPage()">След. ▶</button>
+        </div>
+        <div style="display: flex; gap: 8px; align-items: center;">
+          <span>Масштаб:</span>
+          <button onclick="setZoom(0.75)">75%</button>
+          <button onclick="setZoom(1.0)">100%</button>
+          <button onclick="setZoom(1.5)">150%</button>
+          <button onclick="setZoom(2.0)">200%</button>
+          <button onclick="setZoom(3.0)">300%</button>
+          <span id="cur-zoom" style="font-weight: bold; margin-left: 4px;">100%</span>
+        </div>
+      </div>
+
+      <div class="viewport" id="viewport">
+        <div class="viewer-container" id="viewer-container">
+          <!-- Canvas for PDF.js / Hybrid high-res -->
+          <canvas id="pdfjs-canvas" style="display: none;"></canvas>
+          <!-- Img for PyMuPDF PNG / Hybrid fast preview -->
+          <img id="png-image" style="display: none;" alt="PDF Page">
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Local PDF.js Vendor Scripts -->
+  <script src="/vendor/pdfjs/pdf.min.js"></script>
+  <script src="/stand.js"></script>
+</body>
+</html>
