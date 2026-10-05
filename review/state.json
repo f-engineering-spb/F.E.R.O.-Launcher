@@ -7,11 +7,14 @@
   "perplexity_write_check": "OK",
   "opencode_read_check": "OK",
   "reviewer_account": "9379998-creator",
+  "reviewer_login": "9379998-creator",
+  "reviewer_authorization": "USER_CONFIRMED",
   "last_review_id": "CHANNEL-TEST-001",
   "last_review_comment_id": 5991347981,
   "last_check_date": "2026-10-05",
   "auto_poll": false,
   "repo_visibility": "public",
+  "private_access_check": "NOT_TESTED",
   "prs": {
     "8": "open-draft-unmerged",
     "9": "open-draft-unmerged"
