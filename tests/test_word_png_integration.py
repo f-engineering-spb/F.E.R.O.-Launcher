@@ -216,7 +216,7 @@ class WordPngIntegration(unittest.TestCase):
         self.assertIn('previewType: "WORD"', app_js)
         self.assertIn("async function showWordPreviewFast", app_js)
         self.assertIn("Подготовка предпросмотра Word…", app_js)
-        self.assertIn("wordPaginatedToken", app_js)
+        self.assertIn("const myEpoch = state.renderEpoch + 1;", app_js)
 
 
 if __name__ == "__main__":

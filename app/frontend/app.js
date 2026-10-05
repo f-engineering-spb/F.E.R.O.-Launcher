@@ -1264,6 +1264,10 @@ function syncSelectionToPreview(fileNode) {
 
 async function previewFileDirectly(node, options = {}) {
   if (!node || node.type !== "file") return;
+  // Любой новый показ инвалидирует незавершённые фоновые рендеры:
+  // поздние ответы чужих запросов (в т.ч. медленный Word COM) не должны
+  // подменять текущий экран. Проверки эпохи стоят перед каждой мутацией.
+  state.renderEpoch = (state.renderEpoch || 0) + 1;
   setActiveNativePath(node.path);
   state.revealedPath = node.path;
   const ext = (node.extension || "").toUpperCase();
@@ -2257,16 +2261,19 @@ async function showWordPreviewPaginated(node, options = {}) {
   // 150 dpi сразу, выбранная страница 300 dpi — по запросу из того же PDF.
   // Быстрый HTML (showWordPreviewFast) остаётся запасным путём, если COM
   // недоступен. Устаревший результат чужого запроса текущий выбор не подменяет:
-  // WTOK-метка плюс проверка активного документа перед фолбэком.
+  // эпоха плюс проверка активного документа перед фолбэком.
   const item = {
     ...node,
     previewType: "WORD",
     previewFor: { type: "DOCX", name: node.name, path: node.path },
   };
   const normPath = node.path.replace(/\//g, "\\").toLowerCase();
-  const myToken = (state.wordPaginatedToken = (state.wordPaginatedToken || 0) + 1);
+  // Эпоха, которую выставит renderSelectedPdfFiles синхронно при старте:
+  // любой более новый показ (другой документ или тип) её переживёт,
+  // и тогда ни фолбэк, ни поздние данные сюда не попадут.
+  const myEpoch = state.renderEpoch + 1;
   await renderSelectedPdfFiles([item], { singleFile: true, fullView: options.fullView });
-  if (state.wordPaginatedToken !== myToken) return;
+  if (state.renderEpoch !== myEpoch) return;
   const pages = (state.renderedPages || []).filter((p) => String(p.sourcePath || p.documentPath || "").replace(/\//g, "\\").toLowerCase() === normPath);
   const okPages = pages.filter((p) => p.type !== "missing-preview" && p.url);
   if (okPages.length) return;
