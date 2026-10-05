@@ -1,1 +1,15 @@
-[]
+[
+  {
+    "id": "CHANNEL-TEST-001",
+    "type": "channel-check",
+    "review_comment_id": 5991347981,
+    "review_comment_url": "https://github.com/f-engineering-spb/F.E.R.O.-Launcher/pull/10#issuecomment-5991347981",
+    "review_author": "9379998-creator",
+    "author_match_environment_account": true,
+    "checked_version": "861b529299afbcfce5aa4ab78c49dfe7f0a31506",
+    "reply_comment_id": 5991363710,
+    "reply_comment_url": "https://github.com/f-engineering-spb/F.E.R.O.-Launcher/pull/10#issuecomment-5991363710",
+    "verdict": "read-ok",
+    "date": "2026-10-05"
+  }
+]
