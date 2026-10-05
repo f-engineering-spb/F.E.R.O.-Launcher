@@ -1,0 +1,19 @@
+{
+  "project": "F.E.R.O.-Launcher",
+  "executor": "OpenCode",
+  "date": "2026-10-05",
+  "timezone": "UTC+03:00",
+  "status": "SETUP_READY",
+  "perplexity_write_check": "NOT_TESTED",
+  "opencode_read_check": "NOT_TESTED",
+  "auto_poll": false,
+  "repo_visibility": "public",
+  "prs": {
+    "8": "open-draft-unmerged",
+    "9": "open-draft-unmerged"
+  },
+  "allowed_transfer": [
+    "service files of this task"
+  ],
+  "work_materials_allowed": false
+}

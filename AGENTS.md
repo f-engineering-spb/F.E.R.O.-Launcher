@@ -269,3 +269,8 @@ git switch dvg-main
 - **Запрещённая папка:** `C:\Users\a9379\Documents\Codex\FEngineering_Launcher_v3_OLD_DO_NOT_USE`
 - **Хелпер запуска:** В корне репозитория создан скрипт `RUN_AGENT.cmd` для удобного запуска CLI-агента со считыванием задачи из `prompt.txt`.
 
+### 13. Канал рецензий
+
+- Регламент обмена OpenCode — GitHub — Perplexity: `docs/review-channel.md`.
+- Состояние канала: `review/state.json`.
+
