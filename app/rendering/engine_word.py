@@ -30,7 +30,7 @@ WORD_COM_TIMEOUT_SECONDS = 120
 
 # Версия HTML-рендера DOCX. Поднимается при любом изменении выдачи docx_to_html_string.
 # ensure_docx_preview сверяет её в метаданных и не отдаёт старый HTML за новый.
-DOCX_HTML_RENDER_VERSION = 4
+DOCX_HTML_RENDER_VERSION = 5
 
 # Сколько секунд чужой lock-файл считается живым (защита от зависших генераций).
 CACHE_LOCK_STALE_SECONDS = 180
@@ -81,15 +81,20 @@ def _fmt_letters(value: int, upper: bool) -> str:
     return text if upper else text.lower()
 
 
+# Маркер «вести уровень как при отсутствии lvlRestart» (игнор элемента).
+_ABSENT = object()
+
+
 class _Numbering:
     """Счётчики списков Word по определениям numbering.xml.
 
-    Перезапуски уровней — по документации w:lvlRestart:
-    - 0 означает НИКОГДА не перезапускать этот уровень;
-    - положительное значение — 1-based номер уровня-триггера
-      (1 -> ilvl 0, 2 -> ilvl 1): уровень сбрасывается при его использовании;
-    - отсутствие атрибута — перезапуск при использовании высшего уровня;
-    - некорректные значения — без сброса (тоже никогда).
+    Перезапуски уровней:
+    - явный 0 — никогда не перезапускать этот уровень;
+    - допустимое N — триггер N-1 (существующий высший уровень);
+    - недопустимый положительный триггер — элемент игнорируется,
+      применяется поведение как при отсутствии элемента (предыдущий уровень);
+    - нечисловые значения — собственная политика восстановления (не из
+      документации): без сброса, с записью в диагностику.
     Текущий уровень при собственном наступлении никогда не сбрасывается.
     Состояние независимо для каждого numId. Неподдержанные форматы фиксируются
     в self.unsupported, а не теряются молча.
@@ -156,31 +161,34 @@ class _Numbering:
             "lvlRestart": get("lvlRestart"),
         }
 
-    def _restart_trigger(self, num_id, abstract_id, other: int) -> int | None:
-        """Уровень-триггер для сброса уровня other либо None (= никогда).
+    def _restart_trigger(self, num_id, abstract_id, other: int):
+        """Уровень-триггер для сброса уровня other, None (= никогда)
+        либо _ABSENT (= вести как при отсутствии элемента).
 
-        По Microsoft Open XML триггером может быть только существующий высший
-        уровень: 0 <= trigger < other. Значение 0, отрицательные, нечисловые,
-        указывающие на несуществующий уровень (val > 9) либо на текущий
-        и более глубокие уровни — недопустимы и дают «никогда» (с записью
-        в диагностику). Учитывает вложенное переопределение уровня из lvlOverride.
+        Недопустимый положительный триггер (несуществующий уровень либо
+        не высший для данного уровня) — элемент игнорируется: поведение как
+        при отсутствии атрибута, с записью в диагностику. Нечисловые значения —
+        собственная политика восстановления (документацией не определена):
+        без сброса, с записью в диагностику.
+        Учитывает вложенное переопределение уровня из lvlOverride.
         """
         definition = self._level_def(num_id, abstract_id, other)
         raw = (definition or {}).get("lvlRestart")
         if raw is None:
-            return other - 1 if other > 0 else None
+            return _ABSENT
         try:
             value = int(raw)
         except (TypeError, ValueError):
-            self._diag.append(f"lvlRestart:{raw} не число (numId={num_id} ilvl={other}) — без сброса")
+            self._diag.append(f"lvlRestart:{raw} не число (numId={num_id} ilvl={other}) — "
+                              f"собственная политика: без сброса")
             return None
         if value <= 0:
             return None
         trigger = value - 1
-        if trigger < 0 or trigger >= other or trigger > 8:
-            self._diag.append(
-                f"lvlRestart:{raw} недопустим для ilvl={other} (numId={num_id}) — без сброса")
-            return None
+        if trigger < 0 or trigger > 8 or trigger >= other:
+            self._diag.append(f"lvlRestart:{raw} недопустим для ilvl={other} "
+                              f"(numId={num_id}) — элемент проигнорирован")
+            return _ABSENT
         return trigger
 
     def _level_def(self, num_id, abstract_id, ilvl):
@@ -225,7 +233,11 @@ class _Numbering:
         for other in range(9):
             if other == level:
                 continue
-            if self._restart_trigger(num_id, abstract_id, other) == level:
+            trigger = self._restart_trigger(num_id, abstract_id, other)
+            if trigger is _ABSENT:
+                if other > 0 and (other - 1) == level:
+                    counters[other] = None
+            elif trigger is not None and trigger == level:
                 counters[other] = None
 
         def level_start(idx: int) -> int:

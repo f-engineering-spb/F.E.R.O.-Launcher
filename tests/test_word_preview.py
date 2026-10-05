@@ -691,25 +691,33 @@ class WordPreviewRegression(unittest.TestCase):
             self.assertIn("<b>BOLD-ON</b>", html)
 
 
-    def test_27_invalid_trigger_never_restarts(self):
-        # Недопустимый для уровня триггер (уровень 1, lvlRestart=3 —
-        # триггер ilvl 2 глубже текущего): сброса нет, запись в диагностике.
+    def test_27_invalid_trigger_ignored_like_absent(self):
+        # Недопустимый lvlRestart=3 для уровня 1 (триггер глубже текущего):
+        # элемент игнорируется — поведение как при отсутствии (перезапуск
+        # при использовании предыдущего уровня): 0/1/1/0/1 -> 2.1. в конце.
+        # Контроль с lvlRestart=0 (запрет перезапуска) даёт 2.3. —
+        # тест различает игнорирование элемента и запрет перезапуска.
         with tempfile.TemporaryDirectory() as tmp:
             doc = Document()
-            _add_numbering(doc, 125, [(1, "decimal", "%1."), (1, "decimal", "%1.%2."),
-                                     (1, "decimal", "%1.%2.%3.")],
+            _add_numbering(doc, 125, [(1, "decimal", "%1."), (1, "decimal", "%1.%2.")],
                            125, restarts={1: "3"})
-            seq = [0, 1, 2, 1]
-            for ilvl in seq:
+            _add_numbering(doc, 126, [(1, "decimal", "%1."), (1, "decimal", "%1.%2.")],
+                           126, restarts={1: "0"})
+            for ilvl in (0, 1, 1, 0, 1):
                 p = doc.add_paragraph(f"X-{ilvl}")
                 _set_num_pr(p, 125, ilvl)
+            for ilvl in (0, 1, 1, 0, 1):
+                p = doc.add_paragraph(f"Z-{ilvl}")
+                _set_num_pr(p, 126, ilvl)
             src = self._tmp_doc(Path(tmp))
             doc.save(str(src))
             html, stats = docx_to_html_string(src)
             marks = re.findall(r'<span class="wnum">(.*?)</span>', html)
-            self.assertEqual(marks, ["1.", "1.1.", "1.1.1.", "1.2."])
+            self.assertEqual(marks[:5], ["1.", "1.1.", "1.2.", "2.", "2.1."])
+            self.assertEqual(marks[5:], ["1.", "1.1.", "1.2.", "2.", "2.3."])
             diags = stats.get("numberingUnsupported", [])
-            self.assertTrue(any("lvlRestart:3" in d for d in diags), diags)
+            self.assertTrue(any("lvlRestart:3" in d and "проигнорирован" in d for d in diags),
+                            diags)
 
 
 if __name__ == "__main__":
