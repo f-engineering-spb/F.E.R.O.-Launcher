@@ -209,7 +209,9 @@ const DRIVER = `
   const afterLateGerr = shot();
   out.a_stillB = afterLateGerr.src === afterH.src;
   out.a_noGpages = afterLateGerr.pages.every((p) => norm(p) !== norm("C:\\\\t\\\\G.docx"));
-  out.a_noHtmlFallback = afterLateGerr.wordFetches === shot().wordFetches;
+  out.a_noHtmlFallback = afterLateGerr.wordFetches === afterH.wordFetches;
+  out.a_noHtmlForG = !fetchCalls.some((c) => c.url === "/api/word/preview"
+    && (c.body || "").includes("G.docx"));
   out.a_detailStable = afterLateGerr.detail === afterH.detail;
 
   // B: PDF-путь A упал -> начался HTML-запрос A -> выбран B -> поздний HTML-ответ A.
