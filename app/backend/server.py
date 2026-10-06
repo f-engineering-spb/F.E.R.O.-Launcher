@@ -53,8 +53,11 @@ try:
     from app.rendering import engine_word as _engine_word
 except Exception:  # ядро rendering опционально: сервер стартует и без него
     rendering_dispatcher = None
-    _engine_excel = None
-    _engine_word = None
+try:
+    from app.backend import excel_speed
+except Exception:
+    import excel_speed
+
 RUNTIME_DIR = REPO_ROOT / "runtime"
 MANIFESTS_DIR = RUNTIME_DIR / "manifests"
 FRONTEND_DIR = REPO_ROOT / "app" / "frontend"
@@ -2494,85 +2497,53 @@ def excel_sheet_html(path: Path, sheet_index: int) -> tuple[str, dict]:
 
 
 
-def excel_sheet_preview(path: Path, sheet_index: int) -> dict:
-    """Build one sheet on demand; opening a book must not wait for every tab."""
-    cache_dir = excel_html_cache_dir(path)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    # A new cache version makes existing pages harmless without deleting a
-    # user's cache, including the viewer controls embedded in this HTML.
-    output = cache_dir / f"sheet-{sheet_index + 1}-v10.html"
-    metadata_path = cache_dir / f"sheet-{sheet_index + 1}-v10.json"
-    metadata = None
-    if output.exists() and metadata_path.exists():
-        try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            metadata = None
-    if metadata is None:
-        page, metadata = excel_sheet_html(path, sheet_index)
-        output.write_text(page, encoding="utf-8")
-        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
+def excel_sheet_preview(path: Path, sheet_index: int = 0) -> dict:
+    """Build one sheet on demand via fast H-fast lite HTML."""
+    if not path.exists() or not path.is_file():
+        raise FileNotFoundError(f"Excel-файл не найден: {path}")
+    preview_source = excel_preview_source(path)
+    fast_dir = EXCEL_CACHE_DIR / "fast"
+    res = excel_speed.get_fast_html(preview_source, fast_dir, sheet_index=sheet_index)
     return {
         "index": sheet_index,
-        "url": f"/cache/excel/html/{cache_dir.name}/{output.name}",
-        **metadata,
+        "name": res.get("sheet", f"Лист {sheet_index + 1}"),
+        "url": res["url"],
+        "rows": res.get("rows", 0),
+        "columns": res.get("columns", 0),
+        "truncated": res.get("truncated", False),
+        "limited": res.get("truncated", False),
+        "engineMs": res.get("engineMs", 0.0),
+        "serveMs": res.get("serveMs", 0.0),
+        "cacheHit": res.get("cacheHit", False),
     }
 
 
 def excel_thumbnail_preview(path: Path) -> str:
-    """Build a visual card from the exact same HTML sheet as the large view.
-
-    A workbook must have one visual source of truth.  The former thumbnail
-    constructed a second, simplified table with its own font and row rules;
-    it could therefore disagree with the readable sheet.  The card is now a
-    scaled viewport of the cached HTML sheet used by the full viewer.
-    """
-    if openpyxl is None:
-        raise RuntimeError("Для HTML-просмотра Excel нужен пакет openpyxl")
-    # The rail already places this page in a scaled, clipped iframe.  Returning
-    # the sheet directly means its geometry, fonts and initial position are
-    # exactly the same in the card and in the large viewer.
-    return excel_sheet_preview(path, 0)["url"]
+    """Fast first sheet thumbnail URL for card."""
+    preview_source = excel_preview_source(path)
+    fast_dir = EXCEL_CACHE_DIR / "fast"
+    return excel_speed.get_fast_html(preview_source, fast_dir, sheet_index=0)["url"]
 
 
 def excel_workbook_preview(path: Path) -> dict:
+    """Quickly inspect sheet names and prepare the first sheet preview."""
     if not path.exists() or not path.is_file():
         raise FileNotFoundError(f"Excel-файл не найден: {path}")
     if path.name.startswith("~$") or path.name.startswith(".~"):
         raise ValueError(f"Временный файл блокировки Office: {path.name}")
     if not is_excel_file(path):
         raise ValueError(f"Это не Excel-файл: {path}")
-    if openpyxl is None:
-        raise RuntimeError("Для HTML-просмотра Excel нужен пакет openpyxl")
 
     preview_source = excel_preview_source(path)
-    sheet_names = None
-    if zipfile.is_zipfile(preview_source):
-        try:
-            with zipfile.ZipFile(preview_source, "r") as z:
-                tree = ET.fromstring(z.read("xl/workbook.xml"))
-                ns = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
-                extracted = [el.attrib.get("name", "") for el in tree.findall(".//main:sheet", ns)]
-                if extracted and all(extracted):
-                    sheet_names = extracted
-        except Exception:
-            sheet_names = None
-    if sheet_names is None:
-        book = openpyxl.load_workbook(preview_source, read_only=True, data_only=False)
-        try:
-            sheet_names = list(book.sheetnames)
-        finally:
-            book.close()
-
-    sheets = [{"index": index, "name": name} for index, name in enumerate(sheet_names)]
-    return {
-        "name": path.name,
-        "path": str(path),
-        "sheets": sheets,
-        "maxRows": MAX_XLSX_ROWS,
-        "cacheKey": excel_html_cache_dir(path).name,
-        "thumbnailUrl": excel_thumbnail_preview(path),
-    }
+    fast_dir = EXCEL_CACHE_DIR / "fast"
+    wb_info = excel_speed.get_fast_workbook(preview_source, fast_dir)
+    wb_info["name"] = path.name
+    wb_info["path"] = str(path.resolve())
+    wb_info["sourcePath"] = str(path.resolve())
+    wb_info["sourceName"] = path.name
+    wb_info["sourceType"] = file_extension(path)
+    wb_info["maxRows"] = excel_speed.DEFAULT_MAX_ROWS
+    return wb_info
 
 
 def excel_to_pdf(path: Path) -> tuple[Path, bool]:

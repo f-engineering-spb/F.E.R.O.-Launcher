@@ -104,6 +104,23 @@ def _sheet_names_fast(path: Path) -> list[str] | None:
     return None
 
 
+def read_sheet_names(path: Path) -> list[str]:
+    """Return sheet names via fast zip inspection or openpyxl fallback."""
+    src = Path(path)
+    names = _sheet_names_fast(src)
+    if names is not None:
+        return names
+    if openpyxl is None:
+        raise RuntimeError("openpyxl is required for Excel fast preview")
+    wb_probe = openpyxl.load_workbook(
+        filename=str(src), read_only=True, data_only=True
+    )
+    try:
+        return list(wb_probe.sheetnames)
+    finally:
+        wb_probe.close()
+
+
 def _serialize_value(value) -> str:
     if value is None:
         return ""
@@ -264,19 +281,32 @@ def _write_manifest(out_dir: Path, payload: dict) -> None:
     )
 
 
+def _cache_url(out: Path, base_dir: Path, key: str, filename: str) -> str:
+    try:
+        parts = list(out.resolve().parts)
+        if "cache" in parts:
+            idx = parts.index("cache")
+            return "/" + "/".join(parts[idx:])
+    except Exception:
+        pass
+    return f"/cache/excel/{key}/{filename}"
+
+
 def get_fast_html(
     path: Path,
     base_dir: Path,
+    sheet_index: int = 0,
     max_rows: int = DEFAULT_MAX_ROWS,
     max_cols: int = DEFAULT_MAX_COLS,
 ) -> dict:
     """Cached lite-HTML preview. Returns timings + cache flag."""
     src = Path(path)
-    extra = f"{max_rows}x{max_cols}"
+    extra = f"s{sheet_index}_{max_rows}x{max_cols}"
     key = cache_key_for(src, "fast-html", extra)
     out_dir = Path(base_dir) / key
     out = out_dir / "preview.html"
     meta = out_dir / "manifest.json"
+    url = _cache_url(out, base_dir, key, "preview.html")
     if out.exists() and out.stat().st_size > 0 and meta.exists():
         try:
             saved = json.loads(meta.read_text(encoding="utf-8"))
@@ -291,23 +321,26 @@ def get_fast_html(
                 serve_ms = (time.perf_counter() - t0) * 1000
                 return {
                     "path": str(out),
-                    "url": f"/cache/excel/{key}/preview.html",
+                    "url": url,
                     "bytes": len(blob),
                     "cacheHit": True,
+                    "cacheKey": key,
                     "engineMs": 0.0,
                     "serveMs": serve_ms,
+                    "sheetIndex": sheet_index,
                     **saved.get("info", {}),
                 }
         except (OSError, ValueError):
             pass
     t0 = time.perf_counter()
-    values = read_values_fast(src, 0, max_rows, max_cols)
+    values = read_values_fast(src, sheet_index, max_rows, max_cols)
     page = render_fast_html(values, src.name)
     engine_ms = (time.perf_counter() - t0) * 1000
     out_dir.mkdir(parents=True, exist_ok=True)
     out.write_text(page, encoding="utf-8")
     info = {
         "sheet": values["sheet"],
+        "sheetIndex": sheet_index,
         "rows": values["rows"],
         "columns": values["columns"],
         "truncated": values["truncated"],
@@ -329,12 +362,43 @@ def get_fast_html(
     serve_ms = (time.perf_counter() - t1) * 1000
     return {
         "path": str(out),
-        "url": f"/cache/excel/{key}/preview.html",
+        "url": url,
         "bytes": len(blob),
         "cacheHit": False,
+        "cacheKey": key,
         "engineMs": engine_ms,
         "serveMs": serve_ms,
         **info,
+    }
+
+
+def get_fast_workbook(
+    path: Path,
+    base_dir: Path,
+    max_rows: int = DEFAULT_MAX_ROWS,
+    max_cols: int = DEFAULT_MAX_COLS,
+) -> dict:
+    """Quickly inspect sheet names and prepare the first sheet preview."""
+    src = Path(path)
+    if not src.is_file():
+        raise FileNotFoundError(f"Excel file not found: {src}")
+    names = read_sheet_names(src)
+    sheets = [{"index": idx, "name": name} for idx, name in enumerate(names)]
+    sheet0 = get_fast_html(src, base_dir, sheet_index=0, max_rows=max_rows, max_cols=max_cols)
+    return {
+        "name": src.name,
+        "path": str(src.resolve()),
+        "sourcePath": str(src.resolve()),
+        "sourceName": src.name,
+        "sourceType": src.suffix.lstrip(".").upper(),
+        "sheets": sheets,
+        "activeSheetIndex": 0,
+        "thumbnailUrl": sheet0["url"],
+        "sheetUrl": sheet0["url"],
+        "engineMs": sheet0["engineMs"],
+        "serveMs": sheet0["serveMs"],
+        "cacheHit": sheet0["cacheHit"],
+        "cacheKey": sheet0.get("cacheKey", ""),
     }
 
 

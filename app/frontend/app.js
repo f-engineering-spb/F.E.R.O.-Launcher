@@ -2374,6 +2374,21 @@ async function activateExcelSheet(index) {
     Object.assign(sheet, payload);
   }
   state.excelSheetIndex = index;
+  if (workbook) {
+    workbook.activeSheetIndex = index;
+    // Синхронизируем миниатюру карточки и активную кнопку листа в ленте
+    const wbIndex = state.excelWorkbooks?.indexOf(workbook);
+    if (wbIndex !== undefined && wbIndex >= 0) {
+      const cardThumb = els.pdfThumbs?.querySelector(`.excel-book-thumb[data-workbook-index="${wbIndex}"]`);
+      if (cardThumb) {
+        const frame = cardThumb.querySelector("iframe");
+        if (frame && sheet.url && frame.src !== sheet.url) frame.src = sheet.url;
+        cardThumb.querySelectorAll(".excel-card-sheet-btn").forEach((b) => {
+          b.classList.toggle("active", Number(b.dataset.sheetIndex) === index);
+        });
+      }
+    }
+  }
   [...els.excelTabs.querySelectorAll(".excel-tab")].forEach((tab) => {
     tab.classList.toggle("active", Number(tab.dataset.sheetIndex) === index);
   });
@@ -2494,22 +2509,69 @@ function renderExcelWorkbookRail() {
   state.excelWorkbooks.forEach((workbook, index) => {
     const wrap = document.createElement("div");
     wrap.className = "thumb-wrap";
-    const thumb = document.createElement("button");
-    thumb.type = "button";
+    const thumb = document.createElement("div");
+    thumb.role = "button";
+    thumb.tabIndex = 0;
     thumb.className = "pdf-thumb excel-book-thumb";
     thumb.dataset.workbookIndex = String(index);
     thumb.classList.toggle("active", index === state.excelWorkbookIndex);
-    thumb.title = workbook.name;
+    thumb.title = `${workbook.name} · клик — выбор листа, двойной клик — на весь экран`;
     const preview = document.createElement("div");
     preview.className = "excel-book-preview";
     const frame = document.createElement("iframe");
-    frame.src = workbook.thumbnailUrl || "about:blank";
+    frame.src = workbook.thumbnailUrl || workbook.sheetUrl || "about:blank";
     frame.title = `Миниатюра ${workbook.name}`;
     frame.tabIndex = -1;
     preview.append(frame);
     const label = document.createElement("span");
     label.textContent = workbook.name;
     thumb.append(preview, label);
+
+    // Панель кнопок листов внутри карточки книги Excel
+    if (workbook.sheets && workbook.sheets.length > 0) {
+      const sheetsBar = document.createElement("div");
+      sheetsBar.className = "excel-card-sheets-bar";
+      workbook.sheets.forEach((sheet) => {
+        const sBtn = document.createElement("button");
+        sBtn.type = "button";
+        sBtn.className = "excel-card-sheet-btn";
+        sBtn.dataset.sheetIndex = String(sheet.index);
+        sBtn.classList.toggle("active", (workbook.activeSheetIndex ?? 0) === sheet.index);
+        sBtn.textContent = sheet.name || `Лист ${sheet.index + 1}`;
+        sBtn.title = `Лист: ${sheet.name}`;
+        sBtn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          state.activeNavZone = "thumbs";
+          workbook.activeSheetIndex = sheet.index;
+          sheetsBar.querySelectorAll(".excel-card-sheet-btn").forEach((b) => {
+            b.classList.toggle("active", Number(b.dataset.sheetIndex) === sheet.index);
+          });
+          if (sheet.url) {
+            frame.src = sheet.url;
+          } else {
+            try {
+              const res = await fetch("/api/excel/sheet", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ file: workbook.path, sheetIndex: sheet.index }),
+              });
+              if (res.ok) {
+                const sheetData = await res.json();
+                Object.assign(sheet, sheetData);
+                frame.src = sheet.url;
+              }
+            } catch (_) {}
+          }
+          if (workbook.path) selectRailPath(workbook.path, e);
+          if (state.excelWorkbook === workbook && !els.excelViewer?.hidden) {
+            activateExcelSheet(sheet.index).catch(showOperationError);
+          }
+        });
+        sheetsBar.append(sBtn);
+      });
+      thumb.append(sheetsBar);
+    }
+
     let excelClickTimer = null;
     thumb.addEventListener("mouseenter", () => {
       state.activeNavZone = "thumbs";
@@ -2527,7 +2589,7 @@ function renderExcelWorkbookRail() {
       if (excelClickTimer) return;
       excelClickTimer = setTimeout(() => {
         excelClickTimer = null;
-        activateExcelWorkbook(index).catch(showOperationError);
+        activateExcelWorkbook(index, workbook.activeSheetIndex ?? 0).catch(showOperationError);
       }, 220);
     });
     thumb.addEventListener("dblclick", (event) => {
@@ -2536,7 +2598,7 @@ function renderExcelWorkbookRail() {
         clearTimeout(excelClickTimer);
         excelClickTimer = null;
       }
-      activateExcelWorkbook(index).catch(showOperationError);
+      activateExcelWorkbook(index, workbook.activeSheetIndex ?? 0).catch(showOperationError);
       setViewerMode("full");
     });
     wrap.append(thumb);
@@ -2554,13 +2616,15 @@ function renderExcelWorkbookRail() {
   updateRailSelectionHighlight();
 }
 
-async function activateExcelWorkbook(index) {
+async function activateExcelWorkbook(index, targetSheetIndex = 0) {
   const workbook = state.excelWorkbooks[index];
   if (!workbook) return;
   setStageActive(true);
   state.excelWorkbook = workbook;
   state.excelWorkbookIndex = index;
-  state.excelSheetIndex = 0;
+  const sheetIdx = Number.isInteger(targetSheetIndex) ? targetSheetIndex : (workbook.activeSheetIndex ?? 0);
+  state.excelSheetIndex = sheetIdx;
+  workbook.activeSheetIndex = sheetIdx;
   state.excelScale = 1;
   els.excelBookTitle.textContent = workbook.name;
   els.excelBookTitle.title = workbook.name;
@@ -2576,7 +2640,7 @@ async function activateExcelWorkbook(index) {
     tab.type = "button";
     tab.className = "excel-tab";
     tab.dataset.sheetIndex = String(sheet.index);
-    tab.title = `${sheet.name} · ${sheet.rows} строк · ${sheet.columns} столбцов`;
+    tab.title = `${sheet.name} · ${sheet.rows || 0} строк · ${sheet.columns || 0} столбцов`;
     tab.textContent = sheet.name;
     tab.addEventListener("click", () => activateExcelSheet(sheet.index).catch(showOperationError));
     els.excelTabs.append(tab);
@@ -2589,8 +2653,8 @@ async function activateExcelWorkbook(index) {
   setActiveNativePath(workbook.path);
   revealPathInTree(workbook.path);
   updateViewTransform();
-  await activateExcelSheet(0);
-  window.setTimeout(() => warmExcelWorkbook(workbook, 0), 250);
+  await activateExcelSheet(sheetIdx);
+  window.setTimeout(() => warmExcelWorkbook(workbook, sheetIdx), 250);
 }
 
 async function showExcelWorkbooks(workbooks, options = {}) {
@@ -3220,7 +3284,7 @@ function updateScaleIndicator() {
 }
 
 function zoomThumbs(factor) {
-  state.thumbScale = Math.min(5, Math.max(0.4, Number((state.thumbScale * factor).toFixed(2))));
+  state.thumbScale = Math.min(10, Math.max(0.4, Number((state.thumbScale * factor).toFixed(2))));
   els.pdfThumbs.style.setProperty("--thumb-scale", String(state.thumbScale));
   try {
     localStorage.setItem("launcher_thumb_scale", String(state.thumbScale));

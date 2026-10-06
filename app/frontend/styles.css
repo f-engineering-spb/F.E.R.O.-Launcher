@@ -1106,7 +1106,7 @@ textarea:focus {
 .pdf-thumb img {
   display: block;
   width: 100%;
-  max-height: calc(480px * var(--thumb-scale, 1));
+  max-height: calc(960px * var(--thumb-scale, 1));
   object-fit: contain;
   border: 1px solid #d4d7dc;
   background: #fff;
@@ -1277,7 +1277,7 @@ textarea:focus {
 .excel-book-preview {
   position: relative;
   width: 100%;
-  height: min(480px, 70vh);
+  height: min(calc(480px * var(--thumb-scale, 1)), 85vh);
   overflow: hidden;
   border: 1px solid var(--line);
   background: var(--paper);
@@ -1293,6 +1293,47 @@ textarea:focus {
   pointer-events: none;
   transform: none;
   transform-origin: 0 0;
+}
+
+.excel-card-sheets-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+  margin-bottom: 2px;
+  user-select: none;
+}
+
+.excel-card-sheet-btn {
+  display: inline-block;
+  min-height: 22px;
+  max-width: 180px;
+  padding: 2px 8px;
+  border: 1px solid #c8d0d8;
+  border-radius: 3px;
+  background: #f8fafc;
+  color: #334155;
+  font-size: 11px;
+  line-height: 1.2;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: all 0.12s ease;
+}
+
+.excel-card-sheet-btn:hover {
+  border-color: #3b82f6;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.excel-card-sheet-btn.active {
+  border-color: #2563eb;
+  background: #2563eb;
+  color: #ffffff;
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(37, 99, 235, 0.2);
 }
 
 .excel-sheet-frame {
@@ -1550,7 +1591,7 @@ textarea:focus {
 /* Обёртка миниатюры с кнопками пути: как в дереве, но для ленты */
 .thumb-wrap {
   position: relative;
-  max-width: 860px;
+  max-width: min(100%, calc(1720px * var(--thumb-scale, 1)));
   margin: 0 auto 14px;
 }
 
