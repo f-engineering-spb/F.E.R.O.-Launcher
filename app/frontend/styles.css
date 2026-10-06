@@ -1153,7 +1153,7 @@ textarea:focus {
   margin-top: 5px;
   overflow: hidden;
   color: var(--muted);
-  font-size: 11px;
+  font-size: calc(11px * min(var(--thumb-scale, 1), 1.6));
   line-height: 1.25;
   text-overflow: ellipsis;
   user-select: none;
@@ -1281,10 +1281,13 @@ textarea:focus {
 .excel-book-preview {
   position: relative;
   width: 100%;
-  height: min(480px, 70vh);
+  height: calc(480px * var(--thumb-scale, 1));
+  max-height: calc(85vh * var(--thumb-scale, 1));
+  min-height: calc(160px * var(--thumb-scale, 1));
   overflow: hidden;
   border: 1px solid var(--line);
   background: var(--paper);
+  transition: height 0.12s ease;
 }
 
 .excel-book-preview iframe {
@@ -1554,8 +1557,10 @@ textarea:focus {
 /* Обёртка миниатюры с кнопками пути: как в дереве, но для ленты */
 .thumb-wrap {
   position: relative;
-  max-width: 860px;
+  width: 100%;
+  max-width: min(100%, calc(860px * var(--thumb-scale, 1)));
   margin: 0 auto 14px;
+  transition: max-width 0.12s ease;
 }
 
 .thumb-wrap .pdf-thumb {

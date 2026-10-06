@@ -2849,7 +2849,7 @@ function createPageThumbElement(page) {
   return wrap;
 }
 
-async function appendPagesToViewer(pages, insertAfterKey = null, epoch = null) {
+async function appendPagesToViewer(pages, insertAfterKey = null, epoch = null, insertBeforeKey = null) {
   if (!pages || !pages.length) return;
   if (epoch !== null && state.renderEpoch !== epoch) return;
   clearExcelViewer();
@@ -2880,10 +2880,23 @@ async function appendPagesToViewer(pages, insertAfterKey = null, epoch = null) {
       const loadMoreBtn = els.pdfThumbs.querySelector(".ribbon-load-more");
       if (loadMoreBtn) { anchorNode = loadMoreBtn; appendAtEnd = false; }
     }
+  } else if (insertBeforeKey) {
+    const beforeThumb = els.pdfThumbs.querySelector(`.pdf-thumb[data-page-key="${CSS.escape(insertBeforeKey)}"]`);
+    const beforeWrap = beforeThumb ? (beforeThumb.closest(".thumb-wrap") || beforeThumb) : null;
+    if (beforeWrap) {
+      anchorNode = beforeWrap;
+      appendAtEnd = false;
+    } else {
+      const loadMoreBtn = els.pdfThumbs.querySelector(".ribbon-load-more");
+      if (loadMoreBtn) { anchorNode = loadMoreBtn; appendAtEnd = false; }
+    }
   } else {
     const loadMoreBtn = els.pdfThumbs.querySelector(".ribbon-load-more");
     if (loadMoreBtn) { anchorNode = loadMoreBtn; appendAtEnd = false; }
   }
+
+  let currentAfterKey = insertAfterKey;
+  let currentBeforeKey = insertBeforeKey;
 
   // Строим DOM порциями и отдаём управление между ними, чтобы страница
   // не висела на сотнях миниатюр. Отмена прерывает добавление.
@@ -2899,13 +2912,23 @@ async function appendPagesToViewer(pages, insertAfterKey = null, epoch = null) {
       try { key = pageKey(page); } catch (_) { continue; }
       if (!knownStateKeys.has(key)) {
         knownStateKeys.add(key);
-        if (insertAfterKey) {
-          const afterIdx = state.renderedPages.findIndex((p) => { try { return pageKey(p) === insertAfterKey; } catch (_) { return false; } });
+        if (currentAfterKey) {
+          const afterIdx = state.renderedPages.findIndex((p) => { try { return pageKey(p) === currentAfterKey; } catch (_) { return false; } });
           if (afterIdx >= 0) {
             state.renderedPages.splice(afterIdx + 1, 0, page);
           } else {
             state.renderedPages.push(page);
           }
+          currentAfterKey = key;
+        } else if (currentBeforeKey) {
+          const beforeIdx = state.renderedPages.findIndex((p) => { try { return pageKey(p) === currentBeforeKey; } catch (_) { return false; } });
+          if (beforeIdx >= 0) {
+            state.renderedPages.splice(beforeIdx, 0, page);
+          } else {
+            state.renderedPages.push(page);
+          }
+          currentAfterKey = key;
+          currentBeforeKey = null;
         } else {
           state.renderedPages.push(page);
         }
@@ -3379,18 +3402,20 @@ function zoomPdf(factor) {
 
 function updateScaleIndicator() {
   if (els.scaleResetBtn) {
-    const pct = Math.round((state.treeScale || 1) * 100);
+    const isStageViewing = state.viewMode === "full" || els.pdfViewer?.classList.contains("stage-active");
+    const pct = Math.round((isStageViewing ? (state.view?.scale || 1) : (state.thumbScale || 1)) * 100);
     els.scaleResetBtn.textContent = `${pct}%`;
   }
 }
 
 function zoomThumbs(factor) {
-  state.thumbScale = Math.min(5, Math.max(0.4, Number((state.thumbScale * factor).toFixed(2))));
+  state.thumbScale = Math.min(3.5, Math.max(0.4, Number((state.thumbScale * factor).toFixed(2))));
   els.pdfThumbs.style.setProperty("--thumb-scale", String(state.thumbScale));
   try {
     localStorage.setItem("launcher_thumb_scale", String(state.thumbScale));
   } catch {}
   updateScaleIndicator();
+  showToast("Масштаб миниатюр: " + Math.round(state.thumbScale * 100) + "%");
 }
 
 function zoomTree(factor) {
@@ -3782,6 +3807,41 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
     // полная перестройка здесь больше не нужна и вешала страницу.
   }
 
+  function findInsertionAnchorForBatch(batchIndex) {
+    const currentGroup = pageGroups[batchIndex];
+    if (currentGroup && currentGroup.length) {
+      for (let i = currentGroup.length - 1; i >= 0; i--) {
+        const k = pageKey(currentGroup[i]);
+        if (state.renderedPages.some((p) => pageKey(p) === k)) {
+          return { insertAfterKey: k, insertBeforeKey: null };
+        }
+      }
+    }
+    for (let b = batchIndex - 1; b >= 0; b--) {
+      const group = pageGroups[b];
+      if (group && group.length) {
+        for (let i = group.length - 1; i >= 0; i--) {
+          const k = pageKey(group[i]);
+          if (state.renderedPages.some((p) => pageKey(p) === k)) {
+            return { insertAfterKey: k, insertBeforeKey: null };
+          }
+        }
+      }
+    }
+    for (let b = batchIndex + 1; b < batches.length; b++) {
+      const group = pageGroups[b];
+      if (group && group.length) {
+        for (let i = 0; i < group.length; i++) {
+          const k = pageKey(group[i]);
+          if (state.renderedPages.some((p) => pageKey(p) === k)) {
+            return { insertAfterKey: null, insertBeforeKey: k };
+          }
+        }
+      }
+    }
+    return { insertAfterKey: null, insertBeforeKey: null };
+  }
+
   async function renderBatch(batchIndex) {
     if (state.progressCancelled || state.renderEpoch !== myEpoch) return;
     const batch = batches[batchIndex];
@@ -3789,7 +3849,10 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
     if (!itemsToFetch.length) {
       // Готовые элементы (картинки, карточки) — сразу в ленту, fetch не нужен.
       const ready = pageGroups[batchIndex] || [];
-      if (ready.length) await appendPagesToViewer(ready, null, myEpoch);
+      if (ready.length) {
+        const { insertAfterKey, insertBeforeKey } = findInsertionAnchorForBatch(batchIndex);
+        await appendPagesToViewer(ready, insertAfterKey, myEpoch, insertBeforeKey);
+      }
       return;
     }
     if (state.renderEpoch !== myEpoch) return;
@@ -3805,7 +3868,8 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
       if (fetched.status === "gone") return;
       if (fetched.status === "card") {
         pageGroups[batchIndex] = [fetched.card];
-        await appendPagesToViewer([fetched.card], null, myEpoch);
+        const { insertAfterKey, insertBeforeKey } = findInsertionAnchorForBatch(batchIndex);
+        await appendPagesToViewer([fetched.card], insertAfterKey, myEpoch, insertBeforeKey);
         return;
       }
       // "com": падаем ниже на существующий COM-путь для этого файла.
@@ -3892,7 +3956,8 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
         // сам разберётся и честно покажет ошибку, если она повторится.
         if (firstOnlyPass) break;
         pageGroups[batchIndex] = errCards;
-        await appendPagesToViewer(errCards, null, myEpoch);
+        const { insertAfterKey: errAfter, insertBeforeKey: errBefore } = findInsertionAnchorForBatch(batchIndex);
+        await appendPagesToViewer(errCards, errAfter, myEpoch, errBefore);
         batchDone = true;
       } else {
         if (state.progressCancelled || state.renderEpoch !== myEpoch) return;
@@ -3925,7 +3990,8 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
           }));
         });
         pageGroups[batchIndex] = batchPages;
-        await appendPagesToViewer(batchPages, null, myEpoch);
+        const { insertAfterKey: batchAfter, insertBeforeKey: batchBefore } = findInsertionAnchorForBatch(batchIndex);
+        await appendPagesToViewer(batchPages, batchAfter, myEpoch, batchBefore);
         // S01: первый проход — первая страница уже видна; остальное добавит
         // полный проход (дедуп по pageKey отсечёт повторы).
         if (firstOnlyPass) break;
@@ -3957,7 +4023,8 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
       // S01: первый проход упал исключением — молча идём на полный проход.
       if (firstOnlyPass) break;
       pageGroups[batchIndex] = errCards;
-      await appendPagesToViewer(errCards, null, myEpoch);
+      const { insertAfterKey: excAfter, insertBeforeKey: excBefore } = findInsertionAnchorForBatch(batchIndex);
+      await appendPagesToViewer(errCards, excAfter, myEpoch, excBefore);
       batchDone = true;
     } finally {
       if (controller) {
@@ -4029,6 +4096,43 @@ async function loadMorePdfFiles(itemsToRender) {
   // Продолжение текущего показа: фиксируем его эпоху, чтобы подгрузка
   // сама гасла, если пользователь тем временем начал новый показ.
   const myEpoch = state.renderEpoch || 0;
+  const pageGroups = new Array(batches.length).fill(null);
+  const initialLastKey = state.renderedPages.length ? pageKey(state.renderedPages[state.renderedPages.length - 1]) : null;
+
+  function findInsertionAnchorForLoadMore(batchIndex) {
+    const currentGroup = pageGroups[batchIndex];
+    if (currentGroup && currentGroup.length) {
+      for (let i = currentGroup.length - 1; i >= 0; i--) {
+        const k = pageKey(currentGroup[i]);
+        if (state.renderedPages.some((p) => pageKey(p) === k)) {
+          return { insertAfterKey: k, insertBeforeKey: null };
+        }
+      }
+    }
+    for (let b = batchIndex - 1; b >= 0; b--) {
+      const group = pageGroups[b];
+      if (group && group.length) {
+        for (let i = group.length - 1; i >= 0; i--) {
+          const k = pageKey(group[i]);
+          if (state.renderedPages.some((p) => pageKey(p) === k)) {
+            return { insertAfterKey: k, insertBeforeKey: null };
+          }
+        }
+      }
+    }
+    for (let b = batchIndex + 1; b < batches.length; b++) {
+      const group = pageGroups[b];
+      if (group && group.length) {
+        for (let i = 0; i < group.length; i++) {
+          const k = pageKey(group[i]);
+          if (state.renderedPages.some((p) => pageKey(p) === k)) {
+            return { insertAfterKey: null, insertBeforeKey: k };
+          }
+        }
+      }
+    }
+    return { insertAfterKey: initialLastKey, insertBeforeKey: null };
+  }
 
   function refreshRenderProgress() {
     if (state.progressCancelled) return;
@@ -4061,7 +4165,11 @@ async function loadMorePdfFiles(itemsToRender) {
     const batch = batches[batchIndex];
     const itemsToFetch = batch.filter((item) => item?.type !== "missing-preview" && item?.type !== "native-file" && item?.previewType !== "IMAGE" && item?.previewType !== "TXT");
     if (!itemsToFetch.length) {
-      if (batch.length) await appendPagesToViewer(batch, null, myEpoch);
+      if (batch.length) {
+        pageGroups[batchIndex] = batch;
+        const { insertAfterKey, insertBeforeKey } = findInsertionAnchorForLoadMore(batchIndex);
+        await appendPagesToViewer(batch, insertAfterKey, myEpoch, insertBeforeKey);
+      }
       completedBatches += 1;
       return;
     }
@@ -4122,7 +4230,9 @@ async function loadMorePdfFiles(itemsToRender) {
           }));
         });
         if (state.renderEpoch !== myEpoch) return;
-        await appendPagesToViewer(batchPages, null, myEpoch);
+        pageGroups[batchIndex] = batchPages;
+        const { insertAfterKey: loadAfter, insertBeforeKey: loadBefore } = findInsertionAnchorForLoadMore(batchIndex);
+        await appendPagesToViewer(batchPages, loadAfter, myEpoch, loadBefore);
         batchDone = true;
       } else {
         const errCards = itemsToFetch.map((item) => ({
@@ -4133,9 +4243,13 @@ async function loadMorePdfFiles(itemsToRender) {
           sourceType: item?.extension || "PDF",
           message: payload.error || "Ошибка превью. Откройте файл через кнопку «Открыть».",
         }));
-      if (state.renderEpoch === myEpoch) await appendPagesToViewer(errCards, null, myEpoch);
-      loadErrors += itemsToFetch.length;
-      batchDone = true;
+        if (state.renderEpoch === myEpoch) {
+          pageGroups[batchIndex] = errCards;
+          const { insertAfterKey: errAfter, insertBeforeKey: errBefore } = findInsertionAnchorForLoadMore(batchIndex);
+          await appendPagesToViewer(errCards, errAfter, myEpoch, errBefore);
+        }
+        loadErrors += itemsToFetch.length;
+        batchDone = true;
       }
     } catch (err) {
       if (state.progressCancelled || state.renderEpoch !== myEpoch) return;
@@ -4147,13 +4261,17 @@ async function loadMorePdfFiles(itemsToRender) {
         documentPath: item?.path || "",
         sourcePath: item?.path || "",
         sourceType: item?.extension || "PDF",
-          message: isTimeout
-            ? "Файл не дождался ответа облачного диска Google Drive (включая повторную попытку). Нажмите «Открыть» для прямого запуска."
-            : "Ошибка рендеринга. Откройте файл через кнопку «Открыть».",
-        }));
-        if (state.renderEpoch === myEpoch) await appendPagesToViewer(errCards, null, myEpoch);
-        loadErrors += itemsToFetch.length;
-        batchDone = true;
+        message: isTimeout
+          ? "Файл не дождался ответа облачного диска Google Drive (включая повторную попытку). Нажмите «Открыть» для прямого запуска."
+          : "Ошибка рендеринга. Откройте файл через кнопку «Открыть».",
+      }));
+      if (state.renderEpoch === myEpoch) {
+        pageGroups[batchIndex] = errCards;
+        const { insertAfterKey: excAfter, insertBeforeKey: excBefore } = findInsertionAnchorForLoadMore(batchIndex);
+        await appendPagesToViewer(errCards, excAfter, myEpoch, excBefore);
+      }
+      loadErrors += itemsToFetch.length;
+      batchDone = true;
       } finally {
       if (controller) {
         state.operationControllers = state.operationControllers.filter((item) => item !== controller);
@@ -4455,7 +4573,7 @@ els.pdfStage.addEventListener("wheel", (event) => {
 
 // Масштабирование только миниатюр (Ctrl + колёсико над правой лентой)
 els.pdfThumbs.addEventListener("wheel", (event) => {
-  if (!event.ctrlKey || !event.deltaY) return;
+  if (!(event.ctrlKey || event.metaKey || event.altKey) || !event.deltaY) return;
   event.preventDefault();
   event.stopPropagation();
   zoomThumbs(event.deltaY < 0 ? 1.15 : 0.87);

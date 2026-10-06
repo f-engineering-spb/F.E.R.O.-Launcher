@@ -227,6 +227,128 @@ class WordHtmlConnection(unittest.TestCase):
                     server.shutdown()
                     server.server_close()
 
+    def test_css_thumb_scaling_rules(self):
+        css_file = ROOT / "app" / "frontend" / "styles.css"
+        css_text = css_file.read_text(encoding="utf-8")
+        # Ensure .thumb-wrap scales max-width with --thumb-scale
+        self.assertIn("max-width: min(100%, calc(860px * var(--thumb-scale, 1)))", css_text)
+        # Ensure .excel-book-preview scales height with --thumb-scale
+        self.assertIn("height: calc(480px * var(--thumb-scale, 1))", css_text)
+
+    def test_batch_sequence_insertion_anchoring_via_node(self):
+        import subprocess
+        script = r"""
+        const fs = require('fs');
+        const code = fs.readFileSync('app/frontend/app.js', 'utf8');
+
+        // Verify findInsertionAnchorForBatch is present
+        if (!code.includes('findInsertionAnchorForBatch')) {
+          console.error('FAIL: findInsertionAnchorForBatch missing');
+          process.exit(1);
+        }
+
+        // Test insertion logic on mock batches arriving out of order:
+        // Batch 2 arrives first, then Batch 0, then Batch 1
+        const batches = [
+          [{ name: 'doc0.docx', path: '/docs/doc0.docx', previewType: 'WORD' }],
+          [{ name: 'doc1.docx', path: '/docs/doc1.docx', previewType: 'WORD' }],
+          [{ name: 'doc2.docx', path: '/docs/doc2.docx', previewType: 'WORD' }]
+        ];
+        const pageGroups = [null, null, null];
+        const renderedPages = [];
+
+        function pageKey(p) { return p.path || p.name; }
+
+        function findAnchor(batchIndex) {
+          const currentGroup = pageGroups[batchIndex];
+          if (currentGroup && currentGroup.length) {
+            for (let i = currentGroup.length - 1; i >= 0; i--) {
+              const k = pageKey(currentGroup[i]);
+              if (renderedPages.some(p => pageKey(p) === k)) {
+                return { insertAfterKey: k, insertBeforeKey: null };
+              }
+            }
+          }
+          for (let b = batchIndex - 1; b >= 0; b--) {
+            const group = pageGroups[b];
+            if (group && group.length) {
+              for (let i = group.length - 1; i >= 0; i--) {
+                const k = pageKey(group[i]);
+                if (renderedPages.some(p => pageKey(p) === k)) {
+                  return { insertAfterKey: k, insertBeforeKey: null };
+                }
+              }
+            }
+          }
+          for (let b = batchIndex + 1; b < batches.length; b++) {
+            const group = pageGroups[b];
+            if (group && group.length) {
+              for (let i = 0; i < group.length; i++) {
+                const k = pageKey(group[i]);
+                if (renderedPages.some(p => pageKey(p) === k)) {
+                  return { insertAfterKey: null, insertBeforeKey: k };
+                }
+              }
+            }
+          }
+          return { insertAfterKey: null, insertBeforeKey: null };
+        }
+
+        function insertBatch(batchIndex, pages) {
+          pageGroups[batchIndex] = pages;
+          const { insertAfterKey, insertBeforeKey } = findAnchor(batchIndex);
+          let currentAfterKey = insertAfterKey;
+          let currentBeforeKey = insertBeforeKey;
+
+          for (const page of pages) {
+            const key = pageKey(page);
+            if (currentAfterKey) {
+              const afterIdx = renderedPages.findIndex(p => pageKey(p) === currentAfterKey);
+              if (afterIdx >= 0) {
+                renderedPages.splice(afterIdx + 1, 0, page);
+              } else {
+                renderedPages.push(page);
+              }
+              currentAfterKey = key;
+            } else if (currentBeforeKey) {
+              const beforeIdx = renderedPages.findIndex(p => pageKey(p) === currentBeforeKey);
+              if (beforeIdx >= 0) {
+                renderedPages.splice(beforeIdx, 0, page);
+              } else {
+                renderedPages.push(page);
+              }
+              currentAfterKey = key;
+              currentBeforeKey = null;
+            } else {
+              renderedPages.push(page);
+            }
+          }
+        }
+
+        // 1. Batch 2 arrives first
+        insertBatch(2, [{ name: 'doc2.docx', path: '/docs/doc2.docx' }]);
+        // 2. Batch 0 arrives second
+        insertBatch(0, [{ name: 'doc0.docx', path: '/docs/doc0.docx' }]);
+        // 3. Batch 1 arrives third
+        insertBatch(1, [{ name: 'doc1.docx', path: '/docs/doc1.docx' }]);
+
+        const finalOrder = renderedPages.map(p => p.name).join(',');
+        if (finalOrder !== 'doc0.docx,doc1.docx,doc2.docx') {
+          console.error('FAIL: incorrect order', finalOrder);
+          process.exit(2);
+        }
+
+        console.log('ORDER_OK');
+        """
+        proc = subprocess.run(
+            ["node", "-e", script],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True
+        )
+        self.assertEqual(proc.returncode, 0, f"Node script failed: {proc.stderr}")
+        self.assertIn("ORDER_OK", proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
