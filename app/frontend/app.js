@@ -1296,12 +1296,6 @@ async function previewFileDirectly(node, options = {}) {
     return;
   }
 
-  // 1a. DOCX: быстрый HTML через ядро rendering (без Word COM).
-  if (ext === "DOCX") {
-    await showWordPreviewFast(node, options);
-    return;
-  }
-
   // 2. Если файл уже отрендерен в памяти ЦЕЛИКОМ — мгновенно переключаемся.
   // Если в памяти только титульник (рендер из папки), проваливаемся ниже
   // к полному рендеру, иначе пользователь навсегда останется на 1-й странице.
@@ -1330,7 +1324,7 @@ async function previewFileDirectly(node, options = {}) {
   // 3. Подготовка элемента для рендеринга одиночного документа
   let item = node;
 
-  if (["DOC", "RTF"].includes(ext)) {
+  if (["DOCX", "DOC", "RTF"].includes(ext)) {
     item = {
       ...node,
       previewType: "WORD",
@@ -2224,7 +2218,6 @@ function clearExcelViewer() {
   els.excelBookTitle.title = "";
   els.excelTabs.replaceChildren();
   els.excelSheetFrame.removeAttribute("src");
-  clearWordViewer();
 }
 
 function recordGuiDiag(event, extra = {}) {
@@ -2290,20 +2283,62 @@ function nativeTypeLabel(ext) {
   return `Файл .${e.toLowerCase()}`;
 }
 
+// ПКМ и даблклик внутри HTML Word-документа: события из same-origin iframe
+// не всплывают в основной документ, поэтому контекстное меню DOCX и
+// переключение полноэкранного режима пробрасываем вручную.
+function forwardWordDocContextMenu() {
+  let doc = null;
+  try {
+    doc = els.wordDocFrame?.contentDocument;
+  } catch (_) {
+    return;
+  }
+  if (!doc || doc.__launcherCtxForwarded) return;
+  try {
+    doc.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      try { event.stopPropagation(); } catch (_) {}
+      hideFileContextMenu();
+      const info = getActiveSourceInfo();
+      const path = (info && info.path) || state.wordDoc?.path || state.activeNativePath || "";
+      if (!path) return;
+      let clientX = event.clientX;
+      let clientY = event.clientY;
+      try {
+        const rect = els.wordDocFrame?.getBoundingClientRect();
+        if (rect) {
+          clientX += rect.left;
+          clientY += rect.top;
+        }
+      } catch (_) {}
+      showFileContextMenu(clientX, clientY, { path, isDir: false, ext: extOfPath(path) });
+    });
+    doc.addEventListener("dblclick", (event) => {
+      setViewerMode(state.viewMode === "full" ? "standard" : "full");
+    });
+    doc.__launcherCtxForwarded = true;
+  } catch (_) {}
+}
+
 // S01: DOCX-карточка ленты → тот же быстрый HTML, что и одиночный клик.
 function activateWordHtmlCard(page, options = {}) {
   if (!page) return;
   const filePath = page.previewFor?.path || page.sourcePath || "";
   const fileName = page.previewFor?.name || page.sourceName || page.name || "";
   if (!filePath) return;
+  const key = pageKey(page);
+  state.activePageKey = key;
+  updateActivePdfThumb();
+  setActiveNativePath(filePath);
+  state.revealedPath = filePath;
+  if (!options?.skipTreeScroll) {
+    revealPathInTree(filePath, { skipScroll: false });
+  }
   // Повторный показ построенной карточки — действие пользователя: забираем
   // свежую эпоху (сериализация параллельных кликов, как в previewFileDirectly).
-  // Эпоха самой карточки здесь НЕ проверяется: она устаревает при любом новом
-  // показе, а молчаливый отказ — это пустой экран без ошибки. Свежесть
-  // асинхронного ответа держит entryEpoch внутри showWordPreviewFast.
   const owner = (state.renderEpoch || 0) + 1;
   state.renderEpoch = owner;
-  showWordPreviewFast({ path: filePath, name: fileName }, {
+  showWordPreviewFast({ path: filePath, name: fileName, ...page }, {
     epoch: owner,
     fullView: Boolean(options?.fullView),
   });
@@ -2316,27 +2351,51 @@ async function showWordPreviewFast(node, options = {}) {
   // текущая для одиночного клика — previewFileDirectly её поднимает выше).
   const entryEpoch = options.epoch ?? state.renderEpoch;
   recordGuiDiag("showWordPreviewFast:enter", { entryEpoch, path: node.path });
-  clearExcelViewer();
-  resetPdfPreview();
+  if (els.excelViewer) els.excelViewer.hidden = true;
+  state.excelWorkbook = null;
   setActiveNativePath(node.path);
   state.revealedPath = node.path;
   if (options.fullView) setViewerMode("full");
-  else setViewerMode("standard");
   setStageActive(true);
   els.pdfViewer.classList.remove("empty");
   els.pdfPageImage.hidden = true;
   els.pdfPageImage.removeAttribute("src");
+  if (els.txtViewer) els.txtViewer.hidden = true;
   els.viewerEmpty.hidden = true;
+  els.qualityBadge.hidden = true;
   els.viewerControls.hidden = false;
   els.viewRotate.hidden = true;
-  els.viewPanMode.hidden = true;
-  els.wordDocTitle.textContent = node.name;
-  els.wordDocTitle.title = node.name;
-  els.wordMeta.replaceChildren();
+  els.viewPanMode.hidden = false;
+  els.wordDocTitle.textContent = node.name || "Документ Word";
+  els.wordDocTitle.title = node.path || node.name || "";
   els.wordViewer.hidden = false;
   els.wordOpenNative.onclick = () => openFileByPath(node.path, "native");
   revealPathInTree(node.path);
   recordGuiDiag("showWordPreviewFast:unhidden", { entryEpoch });
+
+  // Если URL уже есть на готовой карточке ленты — отображаем сразу без лишнего fetch
+  if (node.url) {
+    state.wordDoc = { path: node.path, name: node.name, ...node };
+    els.wordMeta.replaceChildren();
+    const chip = document.createElement("span");
+    chip.className = "excel-tab";
+    chip.textContent = `${node.paragraphs ?? "?"} абз. · ${node.tables ?? "?"} табл. · ${formatFileSize(node.bytes)}`;
+    els.wordMeta.append(chip);
+    els.wordDocFrame.onload = () => {
+      forwardWordDocContextMenu();
+      recordGuiDiag("wordDocFrame:loaded", { url: els.wordDocFrame.src });
+    };
+    els.wordDocFrame.onerror = () => recordGuiDiag("wordDocFrame:error", { url: els.wordDocFrame.src });
+    if (els.wordDocFrame.src !== node.url) {
+      els.wordDocFrame.src = node.url;
+    } else {
+      forwardWordDocContextMenu();
+    }
+    finishProgress("Документ Word готов");
+    recordGuiDiag("showWordPreviewFast:done", { entryEpoch, url: node.url });
+    return;
+  }
+
   try {
     startProgress("Документ Word (быстрое превью)", node.path);
     const response = await fetch("/api/word/preview", {
@@ -2352,14 +2411,18 @@ async function showWordPreviewFast(node, options = {}) {
       return;
     }
     state.wordDoc = { path: node.path, name: node.name, ...payload };
+    els.wordMeta.replaceChildren();
     const chip = document.createElement("span");
     chip.className = "excel-tab";
     chip.textContent = `${payload.paragraphs ?? "?"} абз. · ${payload.tables ?? "?"} табл. · ${formatFileSize(payload.bytes)}`;
     els.wordMeta.append(chip);
-    els.wordDocFrame.onload = () => recordGuiDiag("wordDocFrame:loaded", { url: els.wordDocFrame.src });
+    els.wordDocFrame.onload = () => {
+      forwardWordDocContextMenu();
+      recordGuiDiag("wordDocFrame:loaded", { url: els.wordDocFrame.src });
+    };
     els.wordDocFrame.onerror = () => recordGuiDiag("wordDocFrame:error", { url: els.wordDocFrame.src });
     els.wordDocFrame.src = payload.url;
-    finishProgress("Документ готов");
+    finishProgress("Документ Word готов");
     recordGuiDiag("showWordPreviewFast:done", { entryEpoch, url: payload.url });
   } catch (error) {
     recordGuiDiag("showWordPreviewFast:error", { entryEpoch, error: String(error) });
@@ -2374,7 +2437,6 @@ async function showWordPreviewFast(node, options = {}) {
     };
     await renderSelectedPdfFiles([item], { singleFile: true, fullView: options.fullView });
   }
-  if (options.fullView) setViewerMode("full");
 }
 
 async function showNativeAppCard(node, options = {}) {
@@ -2744,6 +2806,7 @@ function createPageThumbElement(page) {
   }
   const label = document.createElement("span");
   label.textContent = page.name;
+  thumb.append(label);
 
   thumb.addEventListener("mouseenter", () => {
     state.activeNavZone = "thumbs";
@@ -2974,6 +3037,9 @@ function thumbPathForPage(page) {
 // Источник текущего кадра для ПКМ в полном экране: всегда исходный файл,
 // никогда PNG-кэш. DWG через пару -> путь DWG, Word -> .docx и т.д.
 function getActiveSourceInfo() {
+  if (!els.wordViewer?.hidden && state.wordDoc?.path) {
+    return { path: state.wordDoc.path, ext: "DOCX" };
+  }
   const excelPath = (state.excelWorkbook && state.excelWorkbook.path) || "";
   if (excelPath) return { path: excelPath, ext: extOfPath(excelPath) };
   if (state.activeTxtPath) return { path: state.activeTxtPath, ext: "TXT" };
@@ -2982,6 +3048,7 @@ function getActiveSourceInfo() {
   });
   const filePath = thumbPathForPage(page);
   if (filePath) return { path: filePath, ext: extOfPath(filePath) };
+  if (state.wordDoc?.path) return { path: state.wordDoc.path, ext: "DOCX" };
   return { path: "", ext: "" };
 }
 
@@ -3583,6 +3650,8 @@ async function fetchWordHtmlCard(item, myEpoch) {
         name: fileName,
         url: payload.url,
         bytes: payload.bytes,
+        paragraphs: payload.paragraphs,
+        tables: payload.tables,
         sourcePath: filePath,
         sourceName: fileName,
         sourceType: "DOCX",
@@ -4286,6 +4355,31 @@ if (els.excelBookTitle) {
   els.excelBookTitle.addEventListener("dblclick", (e) => {
     e.stopPropagation();
     setViewerMode(state.viewMode === "full" ? "standard" : "full");
+  });
+}
+
+if (els.wordDocTitle) {
+  els.wordDocTitle.addEventListener("dblclick", (e) => {
+    e.stopPropagation();
+    setViewerMode(state.viewMode === "full" ? "standard" : "full");
+  });
+}
+
+if (els.wordViewer) {
+  els.wordViewer.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    hideFileContextMenu();
+    const info = getActiveSourceInfo();
+    const path = (info && info.path) || state.wordDoc?.path || state.activeNativePath || "";
+    if (!path) return;
+    showFileContextMenu(e.clientX, e.clientY, { path, isDir: false, ext: extOfPath(path) });
+  });
+}
+
+if (els.wordDocFrame) {
+  els.wordDocFrame.addEventListener("load", () => {
+    forwardWordDocContextMenu();
   });
 }
 

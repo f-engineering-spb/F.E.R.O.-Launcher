@@ -1008,15 +1008,15 @@ textarea:focus {
   overflow-x: hidden;
 }
 
-.shell:not(.full-view) .pdf-viewer:has(.excel-viewer:not([hidden])) .pdf-thumbs {
+.shell:not(.full-view) .pdf-viewer:has(#excelViewer:not([hidden])) .pdf-thumbs {
   display: none !important;
 }
 
-.shell:not(.full-view) .pdf-viewer .pdf-stage:not(:has(.excel-viewer:not([hidden]))) {
+.shell:not(.full-view) .pdf-viewer .pdf-stage:not(:has(#excelViewer:not([hidden]))) {
   display: none !important;
 }
 
-.shell:not(.full-view) .pdf-viewer .pdf-stage:has(.excel-viewer:not([hidden])) {
+.shell:not(.full-view) .pdf-viewer .pdf-stage:has(#excelViewer:not([hidden])) {
   display: block !important;
   position: relative;
   width: 100%;
